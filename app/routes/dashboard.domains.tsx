@@ -125,19 +125,21 @@ export default function Domains() {
 
       <div className="p-5 bg-white border border-slate-200 shadow-xs rounded-2xl">
         <h2 className="text-sm font-bold text-slate-800 uppercase tracking-wider mb-2">
-          Global DNS Nameservers & A-Records
+          Global DNS Configuration for Custom Domains
         </h2>
         <p className="text-xs text-slate-500 mb-4">
-          Point your domain's DNS <strong>A Record</strong> to our edge ingress IP address:
+          In your domain DNS manager (e.g. <strong>Cloudflare, GoDaddy, Namecheap</strong>), configure the following DNS records:
         </p>
-        <div className="flex flex-wrap gap-4 font-mono text-xs">
-          <div className="px-3 py-2 bg-slate-50 rounded-lg border border-slate-200">
-            <span className="text-slate-400">A Record: </span>
-            <span className="font-bold text-slate-900">76.76.21.21</span>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono text-xs">
+          <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-1">
+            <span className="text-[10px] uppercase font-bold text-cyan-600 block">For Subdomains (e.g. test.ddlg.in)</span>
+            <div><span className="text-slate-400">Type: </span><span className="font-bold text-slate-900">CNAME</span></div>
+            <div><span className="text-slate-400">Target / Value: </span><span className="font-bold text-cyan-700">ddl-group-hosting-panel.netlify.app</span></div>
           </div>
-          <div className="px-3 py-2 bg-slate-50 rounded-lg border border-slate-200">
-            <span className="text-slate-400">CNAME: </span>
-            <span className="font-bold text-slate-900">ingress.ddlgroup.host</span>
+          <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-1">
+            <span className="text-[10px] uppercase font-bold text-indigo-600 block">For Root / Apex Domains (e.g. clientdomain.com)</span>
+            <div><span className="text-slate-400">Type: </span><span className="font-bold text-slate-900">A Record</span></div>
+            <div><span className="text-slate-400">Points to IP: </span><span className="font-bold text-indigo-700">75.2.60.5</span></div>
           </div>
         </div>
       </div>
