@@ -5,6 +5,7 @@ import Button from "~/components/Button";
 import TextField from "~/components/TextField";
 import { requireUserProfile } from "~/utils/auth.server";
 import { formatDate } from "~/utils/formatDate";
+import { addNetlifyDomainAlias, removeNetlifyDomainAlias } from "~/utils/netlify.server";
 import { getSupabaseAdminClient } from "~/utils/supabase.server";
 
 export const meta: MetaFunction = () => {
@@ -77,7 +78,13 @@ export async function action({ request }: ActionFunctionArgs) {
       return Response.json({ error: error.message }, { status: 500 });
     }
 
-    return Response.json({ success: "Custom domain connected and SSL certificate issued!" });
+    // Automatically register domain with Netlify edge router & auto-SSL
+    const netlifyRes = await addNetlifyDomainAlias(cleanDomain);
+    const successMsg = netlifyRes.success
+      ? "Custom domain connected and automatically synced to Netlify edge router with SSL!"
+      : "Custom domain connected in database! (Add NETLIFY_AUTH_TOKEN to Netlify env for 100% automated edge sync).";
+
+    return Response.json({ success: successMsg });
   }
 
   if (intent === "delete_domain") {
@@ -85,6 +92,12 @@ export async function action({ request }: ActionFunctionArgs) {
     if (!domainId || typeof domainId !== "string") {
       return Response.json({ error: "Domain ID is required" }, { status: 400 });
     }
+
+    const { data: toDelete } = await supabaseAdmin
+      .from("domains")
+      .select("domain_name")
+      .eq("id", domainId)
+      .maybeSingle();
 
     let deleteQuery = supabaseAdmin.from("domains").delete().eq("id", domainId);
     if (profile.role === "customer") {
@@ -94,6 +107,10 @@ export async function action({ request }: ActionFunctionArgs) {
     const { error } = await deleteQuery;
     if (error) {
       return Response.json({ error: error.message }, { status: 500 });
+    }
+
+    if (toDelete?.domain_name) {
+      await removeNetlifyDomainAlias(toDelete.domain_name);
     }
 
     return Response.json({ success: "Custom domain disconnected and deleted successfully!" });
