@@ -182,6 +182,8 @@ export async function handleCustomDomainRequest(request: Request, relativePath: 
     "localhost",
     "127.0.0.1",
     "ddl-group-hosting-panel.netlify.app",
+    "panel.ddlg.in",
+    "hosting.ddlg.in",
   ];
 
   if (!host || internalHosts.includes(host)) {

@@ -43,10 +43,9 @@ export async function addNetlifyDomainAlias(domain: string): Promise<{ success: 
     let patchPayload: { custom_domain?: string; domain_aliases?: string[] } = {};
 
     if (!currentPrimary) {
-      // Netlify requires a primary custom domain first
       patchPayload = {
-        custom_domain: domain,
-        domain_aliases: currentAliases,
+        custom_domain: "panel.ddlg.in",
+        domain_aliases: [...currentAliases, domain],
       };
     } else {
       patchPayload = {
