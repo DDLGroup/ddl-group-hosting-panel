@@ -80,6 +80,25 @@ export async function action({ request }: ActionFunctionArgs) {
     return Response.json({ success: "Custom domain connected and SSL certificate issued!" });
   }
 
+  if (intent === "delete_domain") {
+    const domainId = formData.get("domain_id");
+    if (!domainId || typeof domainId !== "string") {
+      return Response.json({ error: "Domain ID is required" }, { status: 400 });
+    }
+
+    let deleteQuery = supabaseAdmin.from("domains").delete().eq("id", domainId);
+    if (profile.role === "customer") {
+      deleteQuery = deleteQuery.eq("customer_id", profile.id);
+    }
+
+    const { error } = await deleteQuery;
+    if (error) {
+      return Response.json({ error: error.message }, { status: 500 });
+    }
+
+    return Response.json({ success: "Custom domain disconnected and deleted successfully!" });
+  }
+
   return Response.json({ error: "Invalid intent." }, { status: 400 });
 }
 
@@ -132,7 +151,7 @@ export default function Domains() {
         </p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono text-xs">
           <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-1">
-            <span className="text-[10px] uppercase font-bold text-cyan-600 block">For Subdomains (e.g. test.ddlg.in)</span>
+            <span className="text-[10px] uppercase font-bold text-cyan-600 block">For Subdomains (e.g. test.advjagadish.in / test.ddlg.in)</span>
             <div><span className="text-slate-400">Type: </span><span className="font-bold text-slate-900">CNAME</span></div>
             <div><span className="text-slate-400">Target / Value: </span><span className="font-bold text-cyan-700">ddl-group-hosting-panel.netlify.app</span></div>
           </div>
@@ -154,12 +173,13 @@ export default function Domains() {
                 <th className="py-3.5 px-4">SSL / TLS</th>
                 <th className="py-3.5 px-4">Issuer</th>
                 <th className="py-3.5 px-4">Added On</th>
+                <th className="py-3.5 px-4 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {domains.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="py-8 text-center text-slate-400">
+                  <td colSpan={6} className="py-8 text-center text-slate-400">
                     No custom domains connected yet.
                   </td>
                 </tr>
@@ -167,9 +187,22 @@ export default function Domains() {
                 domains.map((d: any) => (
                   <tr key={d.id} className="hover:bg-slate-50/80 transition-colors">
                     <td className="py-3.5 px-4 font-semibold text-slate-900">
-                      {d.domain_name}
+                      <div className="flex items-center gap-2">
+                        <span>{d.domain_name}</span>
+                        <a
+                          href={`https://${d.domain_name}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-slate-400 hover:text-cyan-600"
+                          title="Open website in new tab"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                          </svg>
+                        </a>
+                      </div>
                     </td>
-                    <td className="py-3.5 px-4 text-xs">
+                    <td className="py-3.5 px-4 text-xs font-medium text-slate-700">
                       {d.hosting_projects?.name || "Website"}
                     </td>
                     <td className="py-3.5 px-4">
@@ -183,6 +216,29 @@ export default function Domains() {
                     </td>
                     <td className="py-3.5 px-4 text-xs text-slate-400">
                       {formatDate(d.created_at)}
+                    </td>
+                    <td className="py-3.5 px-4 text-right">
+                      <Form
+                        method="POST"
+                        onSubmit={(e) => {
+                          if (!confirm(`Are you sure you want to disconnect and delete custom domain "${d.domain_name}"?`)) {
+                            e.preventDefault();
+                          }
+                        }}
+                      >
+                        <input type="hidden" name="intent" value="delete_domain" />
+                        <input type="hidden" name="domain_id" value={d.id} />
+                        <button
+                          type="submit"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg hover:bg-rose-100 hover:text-rose-900 transition"
+                          title="Delete custom domain"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                          Delete
+                        </button>
+                      </Form>
                     </td>
                   </tr>
                 ))
