@@ -1,8 +1,8 @@
 /**
  * Netlify API helper for fully automated custom domain & SSL management.
  * When a client or admin connects a domain in DDL Group Hosting Panel,
- * this automatically registers the domain alias with Netlify's edge router
- * so clients NEVER have to touch Netlify.
+ * this automatically registers the domain with Netlify's edge router and
+ * provisions SSL certificates, so clients NEVER have to touch Netlify.
  */
 
 export async function addNetlifyDomainAlias(domain: string): Promise<{ success: boolean; message?: string }> {
@@ -18,7 +18,7 @@ export async function addNetlifyDomainAlias(domain: string): Promise<{ success: 
   }
 
   try {
-    // 1. Fetch current domain aliases to prevent overwriting
+    // 1. Fetch current site configuration
     const getRes = await fetch(`https://api.netlify.com/api/v1/sites/${siteId}`, {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -32,32 +32,55 @@ export async function addNetlifyDomainAlias(domain: string): Promise<{ success: 
       return { success: false, message: `Netlify API error: ${getRes.statusText}` };
     }
 
-    const siteData = (await getRes.json()) as { domain_aliases?: string[] };
+    const siteData = (await getRes.json()) as { custom_domain?: string | null; domain_aliases?: string[] };
+    const currentPrimary = siteData.custom_domain;
     const currentAliases: string[] = siteData.domain_aliases || [];
 
-    if (currentAliases.includes(domain)) {
-      return { success: true, message: "Domain alias already registered on Netlify." };
+    if (currentPrimary === domain || currentAliases.includes(domain)) {
+      return { success: true, message: "Domain already registered on Netlify." };
     }
 
-    const updatedAliases = [...currentAliases, domain];
+    let patchPayload: { custom_domain?: string; domain_aliases?: string[] } = {};
 
-    // 2. Patch site with updated domain aliases
+    if (!currentPrimary) {
+      // Netlify requires a primary custom domain first
+      patchPayload = {
+        custom_domain: domain,
+        domain_aliases: currentAliases,
+      };
+    } else {
+      patchPayload = {
+        domain_aliases: [...currentAliases, domain],
+      };
+    }
+
+    // 2. Patch site with updated domain configuration
     const patchRes = await fetch(`https://api.netlify.com/api/v1/sites/${siteId}`, {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ domain_aliases: updatedAliases }),
+      body: JSON.stringify(patchPayload),
     });
 
     if (!patchRes.ok) {
       const patchErr = await patchRes.text();
-      console.error("[Netlify API] Failed to update domain aliases:", patchErr);
+      console.error("[Netlify API] Failed to update domain:", patchErr);
       return { success: false, message: `Netlify patch failed: ${patchErr}` };
     }
 
-    console.log(`[Netlify API] Successfully added domain alias: ${domain}`);
+    // 3. Trigger automated SSL certificate provisioning
+    try {
+      await fetch(`https://api.netlify.com/api/v1/sites/${siteId}/ssl`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch (sslErr) {
+      console.warn("[Netlify API] SSL trigger note:", sslErr);
+    }
+
+    console.log(`[Netlify API] Successfully added domain: ${domain}`);
     return { success: true };
   } catch (err: any) {
     console.error("[Netlify API] Exception while adding domain alias:", err);
@@ -85,10 +108,31 @@ export async function removeNetlifyDomainAlias(domain: string): Promise<{ succes
       return { success: false, message: "Failed to fetch site from Netlify." };
     }
 
-    const siteData = (await getRes.json()) as { domain_aliases?: string[] };
+    const siteData = (await getRes.json()) as { custom_domain?: string | null; domain_aliases?: string[] };
+    const currentPrimary = siteData.custom_domain;
     const currentAliases: string[] = siteData.domain_aliases || [];
 
     const updatedAliases = currentAliases.filter((alias) => alias !== domain);
+
+    let patchPayload: { custom_domain?: string | null; domain_aliases?: string[] } = {};
+
+    if (currentPrimary === domain) {
+      if (updatedAliases.length > 0) {
+        patchPayload = {
+          custom_domain: updatedAliases[0],
+          domain_aliases: updatedAliases.slice(1),
+        };
+      } else {
+        patchPayload = {
+          custom_domain: null,
+          domain_aliases: [],
+        };
+      }
+    } else {
+      patchPayload = {
+        domain_aliases: updatedAliases,
+      };
+    }
 
     const patchRes = await fetch(`https://api.netlify.com/api/v1/sites/${siteId}`, {
       method: "PATCH",
@@ -96,14 +140,14 @@ export async function removeNetlifyDomainAlias(domain: string): Promise<{ succes
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ domain_aliases: updatedAliases }),
+      body: JSON.stringify(patchPayload),
     });
 
     if (!patchRes.ok) {
-      return { success: false, message: "Failed to update domain aliases on Netlify." };
+      return { success: false, message: "Failed to update domain on Netlify." };
     }
 
-    console.log(`[Netlify API] Successfully removed domain alias: ${domain}`);
+    console.log(`[Netlify API] Successfully removed domain: ${domain}`);
     return { success: true };
   } catch (err: any) {
     console.error("[Netlify API] Exception while removing domain alias:", err);
