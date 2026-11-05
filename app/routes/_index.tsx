@@ -1,47 +1,34 @@
-import type { MetaFunction } from "@remix-run/node";
+import type { LoaderFunctionArgs, MetaFunction } from "@remix-run/node";
 import { redirect } from "@remix-run/node";
-
-import Guide from "~/components/Guide";
-import Logo from "~/components/Logo";
-import { getSupabaseClient } from "~/utils/getSupabaseClient";
-
-export async function loader() {
-  let isSupabaseAvailable = true;
-
-  try {
-    getSupabaseClient();
-  } catch (error) {
-    isSupabaseAvailable = false;
-  }
-
-  if (isSupabaseAvailable) {
-    return redirect("/login");
-  }
-
-  return Response.json({});
-}
+import { getSession } from "~/session.server";
+import { getSupabaseClient } from "~/utils/supabase.server";
 
 export const meta: MetaFunction = () => {
   return [
-    { title: "New Remix App" },
-    { name: "description", content: "Welcome to Remix!" },
+    { title: "DDL Group Hosting Panel" },
+    { name: "description", content: "Professional Web Hosting Management by Digital Design Leadership Group" },
   ];
 };
 
+export async function loader({ request }: LoaderFunctionArgs) {
+  const session = await getSession(request.headers.get("Cookie"));
+  const token = session.get("__session");
+
+  if (token) {
+    try {
+      const supabase = getSupabaseClient(token);
+      const { data: { user } } = await supabase.auth.getUser(token);
+      if (user) {
+        return redirect("/dashboard");
+      }
+    } catch {
+      // Token expired, fallback to login
+    }
+  }
+
+  return redirect("/login");
+}
+
 export default function Index() {
-  return (
-    <>
-      <nav className="flex justify-center w-full px-4 pt-8">
-        <Logo />
-      </nav>
-      <main className="grow">
-        <Guide />
-      </main>
-      <footer className="w-full px-4 pb-8 mx-auto max-w-7xl">
-        <p className="text-sm text-center">
-          &copy; {new Date().getFullYear()} Netlify. All rights reserved.
-        </p>
-      </footer>
-    </>
-  );
+  return null;
 }
