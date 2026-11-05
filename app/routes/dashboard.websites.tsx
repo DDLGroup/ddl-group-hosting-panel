@@ -247,14 +247,20 @@ export default function Websites() {
 
                 <div className="pt-4 border-t border-slate-100 flex items-center justify-between">
                   <a
-                    href={`https://${site.subdomain}.ddlgroup.host`}
+                    href={`/site/${site.subdomain}`}
                     target="_blank"
                     rel="noreferrer"
-                    className="text-xs font-semibold text-cyan-600 hover:text-cyan-700"
+                    className="text-xs font-bold text-cyan-600 hover:text-cyan-700 flex items-center gap-1"
                   >
-                    Open Live Site &rarr;
+                    <span>Visit Live Site</span>
+                    <span>↗</span>
                   </a>
-                  <span className="text-xs text-slate-400">Node: worker-01</span>
+                  <a
+                    href={`/dashboard/files?project=${site.id}`}
+                    className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition"
+                  >
+                    Upload Files
+                  </a>
                 </div>
               </div>
             );
