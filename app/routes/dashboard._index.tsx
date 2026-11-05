@@ -1,4 +1,10 @@
-import type { ActionFunctionArgs, MetaFunction } from "@remix-run/node";
+
+import type {
+  ActionFunctionArgs,
+  LoaderFunctionArgs,
+  MetaFunction,
+} from "@remix-run/node";
+import { redirect } from "@remix-run/node";
 import { Link, useFetcher, useLoaderData } from "@remix-run/react";
 
 import Button from "~/components/Button";
@@ -6,6 +12,7 @@ import { GlobalErrorBoundary } from "~/components/GlobalErrorBoundary";
 import DeleteIcon from "~/components/icons/Delete";
 import EditIcon from "~/components/icons/Edit";
 import ViewIcon from "~/components/icons/View";
+import { getSession } from "~/session.server";
 import { formatDate } from "~/utils/formatDate";
 import { getInitials } from "~/utils/getInitials";
 import { getSupabaseClient } from "~/utils/getSupabaseClient";
@@ -22,27 +29,54 @@ type Member = {
 export const meta: MetaFunction = () => {
   return [
     {
-      title: "Member List | Remix Dashboard",
+      title: "Member List | DDL Group Hosting Panel",
     },
   ];
 };
 
+// DELETE MEMBER
 export async function action({ request }: ActionFunctionArgs) {
+  const session = await getSession(request.headers.get("Cookie"));
+  const token = session.get("__session");
+
+  if (!token || typeof token !== "string") {
+    throw redirect("/login");
+  }
+
   const formData = await request.formData();
   const memberId = formData.get("memberId");
 
-  const supabase = getSupabaseClient();
-  const { error } = await supabase.from("members").delete().eq("id", memberId);
+  if (!memberId || typeof memberId !== "string") {
+    throw new Response("Invalid member ID.", { status: 400 });
+  }
+
+  const supabase = getSupabaseClient(token);
+
+  const { error } = await supabase
+    .from("members")
+    .delete()
+    .eq("id", memberId);
 
   if (error) {
     throw new Response(error.message, { status: 500 });
   }
 
-  return Response.json({ message: "Member deleted successfully" });
+  return Response.json({
+    message: "Member deleted successfully",
+  });
 }
 
-export async function loader() {
-  const supabase = getSupabaseClient();
+// LOAD MEMBERS
+export async function loader({ request }: LoaderFunctionArgs) {
+  const session = await getSession(request.headers.get("Cookie"));
+  const token = session.get("__session");
+
+  if (!token || typeof token !== "string") {
+    throw redirect("/login");
+  }
+
+  const supabase = getSupabaseClient(token);
+
   const { data: members, error } = await supabase
     .from("members")
     .select("*")
@@ -52,9 +86,12 @@ export async function loader() {
     throw new Response(error.message, { status: 500 });
   }
 
-  return Response.json({ members });
+  return Response.json({
+    members: members ?? [],
+  });
 }
 
+// MEMBER LIST UI
 export default function MemberList() {
   const { members } = useLoaderData<{ members: Member[] }>();
   const deleteMemberFetcher = useFetcher();
@@ -65,92 +102,125 @@ export default function MemberList() {
         <h1 className="text-2xl font-semibold text-slate-900 lg:text-3xl">
           Member List
         </h1>
-        <Button to="/dashboard/new">Add Member</Button>
+
+        <Button to="/dashboard/new">
+          Add Member
+        </Button>
       </div>
+
       <div className="pb-10 overflow-x-auto overflow-y-visible bg-white shadow-md rounded-xl md:pb-12">
         <table className="w-full text-sm bg-white">
           <thead className="bg-slate-50">
             <tr>
               <th className="p-6 font-medium text-left text-slate-900">
-                {members.length} {members.length === 1 ? "member" : "members"}
+                {members.length}{" "}
+                {members.length === 1 ? "member" : "members"}
               </th>
+
               <th className="p-6 font-medium text-left text-slate-900">
                 Location
               </th>
+
               <th className="p-6 font-medium text-left text-slate-900">
                 Created
               </th>
+
               <th className="p-6 font-medium text-left text-slate-900"></th>
             </tr>
           </thead>
+
           <tbody>
-            {members.map((member) => {
-              return (
-                <tr
-                  key={member.id}
-                  className="transition border-b border-slate-200 hover:border-cyan-300"
-                >
-                  <td className="p-6">
-                    <div className="flex items-center gap-4">
-                      {member.avatar_url ? (
-                        <img
-                          className="object-cover w-12 h-12 rounded-full"
-                          src={member.avatar_url}
-                          alt={`${member.name} avatar`}
-                        />
-                      ) : (
-                        <div className="flex items-center justify-center w-12 h-12 font-medium tracking-wide text-white rounded-full bg-cyan-500">
-                          {getInitials(member.name)}
-                        </div>
-                      )}
-                      <div className="space-y-0.5 overflow-hidden">
-                        <p className="font-semibold">{member.name}</p>
-                        <p className="truncate">{member.email}</p>
+            {members.map((member) => (
+              <tr
+                key={member.id}
+                className="transition border-b border-slate-200 hover:border-cyan-300"
+              >
+                <td className="p-6">
+                  <div className="flex items-center gap-4">
+                    {member.avatar_url ? (
+                      <img
+                        className="object-cover w-12 h-12 rounded-full"
+                        src={member.avatar_url}
+                        alt={`${member.name} avatar`}
+                      />
+                    ) : (
+                      <div className="flex items-center justify-center w-12 h-12 font-medium tracking-wide text-white rounded-full bg-cyan-500">
+                        {getInitials(member.name)}
                       </div>
+                    )}
+
+                    <div className="space-y-0.5 overflow-hidden">
+                      <p className="font-semibold">
+                        {member.name}
+                      </p>
+
+                      <p className="truncate">
+                        {member.email}
+                      </p>
                     </div>
-                  </td>
-                  <td className="p-6">{member.location}</td>
-                  <td className="p-6 whitespace-nowrap">
-                    {formatDate(member.created_at)}
-                  </td>
-                  <td className="p-6">
-                    <div className="flex justify-end gap-2">
-                      <Link
-                        to={`/dashboard/${member.id}`}
-                        className="flex items-center justify-center w-8 h-8 transition rounded-md cursor-pointer text-slate-300 hover:text-cyan-600 hover:bg-cyan-50"
-                        aria-label="View details"
+                  </div>
+                </td>
+
+                <td className="p-6">
+                  {member.location}
+                </td>
+
+                <td className="p-6 whitespace-nowrap">
+                  {formatDate(member.created_at)}
+                </td>
+
+                <td className="p-6">
+                  <div className="flex justify-end gap-2">
+                    <Link
+                      to={`/dashboard/${member.id}`}
+                      className="flex items-center justify-center w-8 h-8 transition rounded-md cursor-pointer text-slate-300 hover:text-cyan-600 hover:bg-cyan-50"
+                      aria-label="View details"
+                    >
+                      <ViewIcon />
+                    </Link>
+
+                    <Link
+                      to={`/dashboard/${member.id}/edit`}
+                      className="flex items-center justify-center w-8 h-8 transition rounded-md cursor-pointer text-slate-300 hover:text-cyan-600 hover:bg-cyan-50"
+                      aria-label="Edit"
+                    >
+                      <EditIcon />
+                    </Link>
+
+                    <deleteMemberFetcher.Form
+                      method="POST"
+                      action="/dashboard?index"
+                    >
+                      <input
+                        type="hidden"
+                        name="memberId"
+                        value={member.id}
+                      />
+
+                      <button
+                        type="submit"
+                        disabled={deleteMemberFetcher.state !== "idle"}
+                        className="flex items-center justify-center w-8 h-8 transition rounded-md cursor-pointer text-slate-300 hover:text-cyan-600 hover:bg-cyan-50 disabled:opacity-50"
+                        aria-label="Delete"
                       >
-                        <ViewIcon />
-                      </Link>
-                      <Link
-                        to={`/dashboard/${member.id}/edit`}
-                        className="flex items-center justify-center w-8 h-8 transition rounded-md cursor-pointer text-slate-300 hover:text-cyan-600 hover:bg-cyan-50"
-                        aria-label="Edit"
-                      >
-                        <EditIcon />
-                      </Link>
-                      <deleteMemberFetcher.Form
-                        method="POST"
-                        action="/dashboard?index"
-                      >
-                        <input
-                          type="hidden"
-                          name="memberId"
-                          value={member.id}
-                        />
-                        <button
-                          type="submit"
-                          className="flex items-center justify-center w-8 h-8 transition rounded-md cursor-pointer text-slate-300 hover:text-cyan-600 hover:bg-cyan-50"
-                          aria-label="Delete"
-                        >
-                          <DeleteIcon />
-                        </button>
-                      </deleteMemberFetcher.Form>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
+                        <DeleteIcon />
+                      </button>
+                    </deleteMemberFetcher.Form>
+                  </div>
+                </td>
+              </tr>
+            ))}
+
+            {members.length === 0 && (
+              <tr>
+                <td
+                  colSpan={4}
+                  className="p-10 text-center text-slate-500"
+                >
+                  No members found. Add your first member.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -158,6 +228,7 @@ export default function MemberList() {
   );
 }
 
+// ERROR HANDLING
 export function ErrorBoundary() {
   return <GlobalErrorBoundary />;
 }
