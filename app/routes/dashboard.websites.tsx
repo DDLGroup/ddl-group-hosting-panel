@@ -7,7 +7,7 @@ import { requireUserProfile } from "~/utils/auth.server";
 import { formatDate } from "~/utils/formatDate";
 import { removeNetlifyDomainAlias } from "~/utils/netlify.server";
 import { getSupabaseAdminClient } from "~/utils/supabase.server";
-import { deleteAllCloudWebsiteFiles } from "~/utils/websiteDeployer.server";
+import { deleteAllCloudWebsiteFiles, purgeExecutionNodeSite } from "~/utils/websiteDeployer.server";
 
 export const meta: MetaFunction = () => {
   return [{ title: "Websites | DDL Group Hosting Panel" }];
@@ -166,7 +166,7 @@ export async function action({ request }: ActionFunctionArgs) {
     // 1. Fetch project details to verify existence and check permissions
     let projectQuery = supabaseAdmin
       .from("hosting_projects")
-      .select("id, name, subdomain, customer_id")
+      .select("id, name, subdomain, server_node_id, customer_id")
       .eq("id", projectId);
 
     if (profile.role === "customer") {
@@ -213,8 +213,11 @@ export async function action({ request }: ActionFunctionArgs) {
       .delete()
       .eq("project_id", project.id);
 
-    // 6. Delete all storage files in Supabase Storage under client-websites/{subdomain}
-    await deleteAllCloudWebsiteFiles(project.subdomain);
+    // 6. Delete all storage files in Supabase Storage AND execution node (ServerByte)
+    await Promise.all([
+      deleteAllCloudWebsiteFiles(project.subdomain),
+      purgeExecutionNodeSite(project.subdomain, project.server_node_id),
+    ]);
 
     // 7. Delete the project record from hosting_projects (domains cascade delete if any remain)
     const { error: deleteErr } = await supabaseAdmin

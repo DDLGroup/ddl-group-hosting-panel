@@ -186,6 +186,54 @@ export async function syncZipBufferToExecutionNode(subdomain: string, zipBuffer:
 }
 
 /**
+ * Automatically purges website files from the assigned Execution Node (e.g. ServerByte).
+ */
+export async function purgeExecutionNodeSite(subdomain: string, serverNodeId?: string | null) {
+  try {
+    const supabaseAdmin = getSupabaseAdminClient();
+    let nodeId = serverNodeId;
+    if (!nodeId) {
+      const { data: project } = await supabaseAdmin
+        .from("hosting_projects")
+        .select("server_node_id")
+        .eq("subdomain", subdomain)
+        .maybeSingle();
+      nodeId = project?.server_node_id;
+    }
+
+    let query = supabaseAdmin.from("server_nodes").select("*");
+    if (nodeId) {
+      query = query.eq("id", nodeId);
+    } else {
+      query = query.eq("status", "active");
+    }
+
+    const { data: nodes } = await query;
+    const targetNodes = Array.isArray(nodes) ? nodes : nodes ? [nodes] : [];
+
+    for (const node of targetNodes) {
+      if (node?.capabilities?.bridge_url && node?.capabilities?.token) {
+        const form = new FormData();
+        form.append("action", "delete_site");
+        form.append("slug", subdomain);
+
+        const res = await fetch(node.capabilities.bridge_url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${node.capabilities.token}`,
+          },
+          body: form,
+        });
+
+        console.log(`[Node Purge] Purged ${subdomain} from ${node.name}: HTTP ${res.status}`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[Node Purge] Error purging site from execution node:`, err);
+  }
+}
+
+/**
  * Serves a website asset from Supabase Storage by subdomain and file path.
  */
 export async function serveCloudWebsiteFile(subdomain: string, rawPath: string = "index.html") {
