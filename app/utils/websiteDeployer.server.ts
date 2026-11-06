@@ -204,3 +204,41 @@ export async function handleCustomDomainRequest(request: Request, relativePath: 
   const subdomain = (domainRecord.hosting_projects as any).subdomain;
   return serveCloudWebsiteFile(subdomain, relativePath);
 }
+
+/**
+ * Recursively deletes all files stored in Supabase Storage under client-websites/{subdomain}/
+ */
+export async function deleteAllCloudWebsiteFiles(subdomain: string): Promise<{ deletedCount: number }> {
+  const supabaseAdmin = getSupabaseAdminClient();
+
+  async function listAllPaths(folder: string): Promise<string[]> {
+    const { data: items, error } = await supabaseAdmin.storage
+      .from("client-websites")
+      .list(folder, { limit: 1000 });
+
+    if (error || !items || items.length === 0) return [];
+
+    let allFiles: string[] = [];
+    for (const item of items) {
+      const fullPath = folder ? `${folder}/${item.name}` : item.name;
+      if (item.id) {
+        allFiles.push(fullPath);
+      } else {
+        const nested = await listAllPaths(fullPath);
+        allFiles = allFiles.concat(nested);
+      }
+    }
+    return allFiles;
+  }
+
+  try {
+    const filesToDelete = await listAllPaths(subdomain);
+    if (filesToDelete.length > 0) {
+      await supabaseAdmin.storage.from("client-websites").remove(filesToDelete);
+    }
+    return { deletedCount: filesToDelete.length };
+  } catch (err) {
+    console.error(`[Storage] Failed to delete website files for ${subdomain}:`, err);
+    return { deletedCount: 0 };
+  }
+}

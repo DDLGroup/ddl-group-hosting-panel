@@ -5,7 +5,9 @@ import Button from "~/components/Button";
 import TextField from "~/components/TextField";
 import { requireUserProfile } from "~/utils/auth.server";
 import { formatDate } from "~/utils/formatDate";
+import { removeNetlifyDomainAlias } from "~/utils/netlify.server";
 import { getSupabaseAdminClient } from "~/utils/supabase.server";
+import { deleteAllCloudWebsiteFiles } from "~/utils/websiteDeployer.server";
 
 export const meta: MetaFunction = () => {
   return [{ title: "Websites | DDL Group Hosting Panel" }];
@@ -148,6 +150,80 @@ export async function action({ request }: ActionFunctionArgs) {
     return Response.json({ success: "Website successfully provisioned!" });
   }
 
+  if (intent === "delete_website") {
+    const projectId = formData.get("project_id");
+    if (typeof projectId !== "string" || !projectId) {
+      return Response.json({ error: "Project ID is required." }, { status: 400 });
+    }
+
+    // 1. Fetch project details to verify existence and check permissions
+    let projectQuery = supabaseAdmin
+      .from("hosting_projects")
+      .select("id, name, subdomain, customer_id")
+      .eq("id", projectId);
+
+    if (profile.role === "customer") {
+      projectQuery = projectQuery.eq("customer_id", profile.id);
+    }
+
+    const { data: project, error: fetchErr } = await projectQuery.maybeSingle();
+
+    if (fetchErr || !project) {
+      return Response.json({ error: "Website project not found or access denied." }, { status: 404 });
+    }
+
+    // 2. Fetch and remove all connected custom domains from Netlify edge router
+    const { data: connectedDomains } = await supabaseAdmin
+      .from("domains")
+      .select("domain_name")
+      .eq("project_id", project.id);
+
+    if (connectedDomains && connectedDomains.length > 0) {
+      for (const d of connectedDomains) {
+        try {
+          await removeNetlifyDomainAlias(d.domain_name);
+        } catch (netlifyErr) {
+          console.warn(`[Delete Website] Failed to remove Netlify alias for ${d.domain_name}:`, netlifyErr);
+        }
+      }
+    }
+
+    // 3. Delete all associated databases
+    await supabaseAdmin
+      .from("databases")
+      .delete()
+      .eq("project_id", project.id);
+
+    // 4. Delete all associated backups
+    await supabaseAdmin
+      .from("backups")
+      .delete()
+      .eq("project_id", project.id);
+
+    // 5. Delete all associated deployments
+    await supabaseAdmin
+      .from("deployments")
+      .delete()
+      .eq("project_id", project.id);
+
+    // 6. Delete all storage files in Supabase Storage under client-websites/{subdomain}
+    await deleteAllCloudWebsiteFiles(project.subdomain);
+
+    // 7. Delete the project record from hosting_projects (domains cascade delete if any remain)
+    const { error: deleteErr } = await supabaseAdmin
+      .from("hosting_projects")
+      .delete()
+      .eq("id", project.id);
+
+    if (deleteErr) {
+      return Response.json({ error: deleteErr.message }, { status: 500 });
+    }
+
+    return Response.json({
+      success: `Website "${project.name}" and all associated files, storage, domains, and databases were permanently deleted.`,
+    });
+  }
+
   return Response.json({ error: "Invalid action." }, { status: 400 });
 }
 
@@ -245,7 +321,7 @@ export default function Websites() {
                   </div>
                 </div>
 
-                <div className="pt-4 border-t border-slate-100 flex items-center justify-between">
+                <div className="pt-4 border-t border-slate-100 flex items-center justify-between gap-2">
                   <a
                     href={`/site/${site.subdomain}`}
                     target="_blank"
@@ -255,12 +331,39 @@ export default function Websites() {
                     <span>Visit Live Site</span>
                     <span>↗</span>
                   </a>
-                  <a
-                    href={`/dashboard/files?project=${site.id}`}
-                    className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition"
-                  >
-                    Upload Files
-                  </a>
+                  <div className="flex items-center gap-2">
+                    <a
+                      href={`/dashboard/files?project=${site.id}`}
+                      className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition"
+                    >
+                      Upload Files
+                    </a>
+                    <Form
+                      method="POST"
+                      onSubmit={(e) => {
+                        if (
+                          !confirm(
+                            `Are you sure you want to permanently delete "${site.name}"?\n\nThis will permanently delete:\n• All website files & storage (${site.subdomain}.ddlgroup.host)\n• All connected custom domains & SSL\n• All associated databases & deployments\n\nThis action cannot be undone.`
+                          )
+                        ) {
+                          e.preventDefault();
+                        }
+                      }}
+                    >
+                      <input type="hidden" name="intent" value="delete_website" />
+                      <input type="hidden" name="project_id" value={site.id} />
+                      <button
+                        type="submit"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg hover:bg-rose-100 hover:text-rose-900 transition"
+                        title={`Delete website "${site.name}"`}
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                        <span>Delete</span>
+                      </button>
+                    </Form>
+                  </div>
                 </div>
               </div>
             );
