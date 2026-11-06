@@ -94,6 +94,73 @@ export async function deployZipToCloudStorage(subdomain: string, zipBuffer: Buff
 }
 
 /**
+ * Automatically provisions a website directory and starter files on the execution node (e.g. ServerByte).
+ */
+export async function provisionExecutionNodeSite(
+  subdomain: string,
+  serverNodeId?: string | null
+): Promise<{ success: boolean; message?: string }> {
+  try {
+    const supabaseAdmin = getSupabaseAdminClient();
+    let nodeId = serverNodeId;
+
+    if (!nodeId) {
+      const { data: project } = await supabaseAdmin
+        .from("hosting_projects")
+        .select("server_node_id")
+        .eq("subdomain", subdomain)
+        .maybeSingle();
+      nodeId = project?.server_node_id;
+    }
+
+    if (!nodeId) {
+      const { data: activeNode } = await supabaseAdmin
+        .from("server_nodes")
+        .select("id")
+        .eq("status", "active")
+        .limit(1)
+        .maybeSingle();
+      nodeId = activeNode?.id || null;
+    }
+
+    if (!nodeId) {
+      console.warn(`[Node Provision] No active server node found for ${subdomain}.`);
+      return { success: false, message: "No active server node found" };
+    }
+
+    const { data: node } = await supabaseAdmin
+      .from("server_nodes")
+      .select("*")
+      .eq("id", nodeId)
+      .maybeSingle();
+
+    if (!node || !node.capabilities?.bridge_url || !node.capabilities?.token) {
+      console.warn(`[Node Provision] Node ${nodeId} missing bridge credentials.`);
+      return { success: false, message: "Node missing bridge credentials" };
+    }
+
+    const form = new FormData();
+    form.append("action", "provision_site");
+    form.append("slug", subdomain);
+
+    const res = await fetch(node.capabilities.bridge_url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${node.capabilities.token}`,
+      },
+      body: form,
+    });
+
+    const resData = await res.json().catch(() => ({}));
+    console.log(`[Node Provision] Provisioned ${subdomain} on ${node.name}: HTTP ${res.status}`, resData);
+    return { success: res.ok, message: resData?.message || "Provisioned" };
+  } catch (err: any) {
+    console.warn(`[Node Provision] Error provisioning site on execution node:`, err);
+    return { success: false, message: err?.message || "Unknown error" };
+  }
+}
+
+/**
  * Automatically synchronizes website files to the assigned Execution Node (e.g. ServerByte).
  * Files are extracted and deployed to public_html/ddl-group-hosting/sites/{subdomain}/*
  */
@@ -109,12 +176,33 @@ export async function syncFilesToExecutionNode(
       .eq("subdomain", subdomain)
       .maybeSingle();
 
-    if (!project || !project.server_node_id) return;
+    let nodeId = project?.server_node_id;
+
+    // Auto-resolve to default active node if not assigned
+    if (!nodeId) {
+      const { data: activeNode } = await supabaseAdmin
+        .from("server_nodes")
+        .select("id")
+        .eq("status", "active")
+        .limit(1)
+        .maybeSingle();
+      if (activeNode) {
+        nodeId = activeNode.id;
+        if (project?.id) {
+          await supabaseAdmin
+            .from("hosting_projects")
+            .update({ server_node_id: activeNode.id })
+            .eq("id", project.id);
+        }
+      }
+    }
+
+    if (!nodeId) return;
 
     const { data: node } = await supabaseAdmin
       .from("server_nodes")
       .select("*")
-      .eq("id", project.server_node_id)
+      .eq("id", nodeId)
       .maybeSingle();
 
     if (!node || !node.capabilities?.bridge_url || !node.capabilities?.token) return;
@@ -155,12 +243,33 @@ export async function syncZipBufferToExecutionNode(subdomain: string, zipBuffer:
       .eq("subdomain", subdomain)
       .maybeSingle();
 
-    if (!project || !project.server_node_id) return;
+    let nodeId = project?.server_node_id;
+
+    // Auto-resolve to default active node if not assigned
+    if (!nodeId) {
+      const { data: activeNode } = await supabaseAdmin
+        .from("server_nodes")
+        .select("id")
+        .eq("status", "active")
+        .limit(1)
+        .maybeSingle();
+      if (activeNode) {
+        nodeId = activeNode.id;
+        if (project?.id) {
+          await supabaseAdmin
+            .from("hosting_projects")
+            .update({ server_node_id: activeNode.id })
+            .eq("id", project.id);
+        }
+      }
+    }
+
+    if (!nodeId) return;
 
     const { data: node } = await supabaseAdmin
       .from("server_nodes")
       .select("*")
-      .eq("id", project.server_node_id)
+      .eq("id", nodeId)
       .maybeSingle();
 
     if (!node || !node.capabilities?.bridge_url || !node.capabilities?.token) return;

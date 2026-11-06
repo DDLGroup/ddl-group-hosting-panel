@@ -150,7 +150,7 @@ export async function action({ request }: ActionFunctionArgs) {
   // Verify ownership
   let query = supabaseAdmin
     .from("hosting_projects")
-    .select("id, name, subdomain, runtime, customer_id")
+    .select("id, name, subdomain, runtime, server_node_id, customer_id")
     .eq("id", projectId);
 
   if (profile.role === "customer") {
@@ -288,6 +288,10 @@ export async function action({ request }: ActionFunctionArgs) {
     if (folderErr) {
       return Response.json({ error: folderErr.message }, { status: 500 });
     }
+
+    await syncFilesToExecutionNode(project.subdomain, [
+      { path: `${targetPrefix}${cleanFolderName}/.keep`, buffer: Buffer.from("") },
+    ]);
 
     return Response.json({ success: `Folder "${cleanFolderName}" created successfully!` });
   }

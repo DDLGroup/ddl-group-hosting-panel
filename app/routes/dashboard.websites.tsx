@@ -7,7 +7,12 @@ import { requireUserProfile } from "~/utils/auth.server";
 import { formatDate } from "~/utils/formatDate";
 import { removeNetlifyDomainAlias } from "~/utils/netlify.server";
 import { getSupabaseAdminClient } from "~/utils/supabase.server";
-import { deleteAllCloudWebsiteFiles, purgeExecutionNodeSite } from "~/utils/websiteDeployer.server";
+import {
+  deleteAllCloudWebsiteFiles,
+  purgeExecutionNodeSite,
+  provisionExecutionNodeSite,
+  syncFilesToExecutionNode,
+} from "~/utils/websiteDeployer.server";
 
 export const meta: MetaFunction = () => {
   return [{ title: "Websites | DDL Group Hosting Panel" }];
@@ -122,6 +127,20 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     }
 
+    // Auto-resolve active server node (ServerByte)
+    let serverNodeId = (formData.get("server_node_id") as string | null) || null;
+    if (!serverNodeId) {
+      const { data: activeNode } = await supabaseAdmin
+        .from("server_nodes")
+        .select("id")
+        .eq("status", "active")
+        .limit(1)
+        .maybeSingle();
+      if (activeNode) {
+        serverNodeId = activeNode.id;
+      }
+    }
+
     // Create hosting project
     const { data: project, error: createError } = await supabaseAdmin
       .from("hosting_projects")
@@ -132,6 +151,7 @@ export async function action({ request }: ActionFunctionArgs) {
         subdomain: cleanSubdomain,
         runtime: runtime as string,
         runtime_version: runtimeVersion as string,
+        server_node_id: serverNodeId || null,
         status: "active",
       })
       .select()
@@ -141,20 +161,140 @@ export async function action({ request }: ActionFunctionArgs) {
       return Response.json({ error: createError.message }, { status: 500 });
     }
 
-    // Record initial deployment log
+    // Auto-provision on ServerByte & initialize starter index.html
     if (project) {
+      // 1. Provision folder on ServerByte
+      await provisionExecutionNodeSite(cleanSubdomain, serverNodeId);
+
+      // 2. Generate initial modern starter index.html
+      const starterHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${name.trim()} - DDL Group Hosting</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #090d16 0%, #0f172a 100%);
+      color: #f8fafc;
+      padding: 1.5rem;
+    }
+    .card {
+      background: rgba(30, 41, 59, 0.7);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 1.25rem;
+      padding: 3rem 2.5rem;
+      max-width: 540px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.85rem;
+      background: rgba(6, 182, 212, 0.15);
+      border: 1px solid rgba(6, 182, 212, 0.3);
+      color: #22d3ee;
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      margin-bottom: 1.5rem;
+    }
+    .badge-dot {
+      width: 8px;
+      height: 8px;
+      background: #22d3ee;
+      border-radius: 50%;
+      box-shadow: 0 0 10px #22d3ee;
+    }
+    h1 {
+      font-size: 2rem;
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      margin-bottom: 0.75rem;
+      background: linear-gradient(to right, #ffffff, #cbd5e1);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    p {
+      color: #94a3b8;
+      font-size: 0.95rem;
+      line-height: 1.6;
+      margin-bottom: 1.5rem;
+    }
+    .url-pill {
+      display: inline-block;
+      padding: 0.5rem 1rem;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 0.5rem;
+      color: #38bdf8;
+      font-family: monospace;
+      font-size: 0.9rem;
+      word-break: break-all;
+      margin-bottom: 1.5rem;
+    }
+    .footer {
+      font-size: 0.8rem;
+      color: #64748b;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      padding-top: 1.25rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">
+      <span class="badge-dot"></span>
+      <span>DDL Group Hosting Active</span>
+    </div>
+    <h1>${name.trim()}</h1>
+    <div class="url-pill">https://${cleanSubdomain}.ddlgroup.host</div>
+    <p>Your website environment has been automatically generated on the ServerByte production node. Upload your HTML, PHP, or ZIP archive in the File Manager to make your site live!</p>
+    <div class="footer">
+      Powered by DDL Group Hosting Panel &bull; High Performance Cloud
+    </div>
+  </div>
+</body>
+</html>`;
+
+      const starterBuffer = Buffer.from(starterHtml, "utf-8");
+
+      // Save to Supabase Storage
+      await supabaseAdmin.storage
+        .from("client-websites")
+        .upload(`${cleanSubdomain}/index.html`, starterBuffer, {
+          contentType: "text/html; charset=utf-8",
+          upsert: true,
+        });
+
+      // Sync starter file to execution node (ServerByte)
+      await syncFilesToExecutionNode(cleanSubdomain, [
+        { path: "index.html", buffer: starterBuffer },
+      ]);
+
       await supabaseAdmin.from("deployments").insert({
         project_id: project.id,
         version_number: 1,
         runtime: runtime as string,
         source_type: "manual",
         status: "deployed",
-        commit_message: "Initial project scaffold provisioned",
+        commit_message: "Auto-provisioned environment and initial starter template",
         deployed_by: profile.id,
       });
     }
 
-    return Response.json({ success: "Website successfully provisioned!" });
+    return Response.json({ success: "Website successfully provisioned and synchronized with ServerByte!" });
   }
 
   if (intent === "delete_website") {
@@ -552,8 +692,29 @@ export default function Websites() {
                 </select>
               </div>
 
-              <div className="p-3 text-xs text-slate-500 bg-cyan-50/60 border border-cyan-100 rounded-xl">
-                ℹ️ After provisioning, you can upload a ZIP archive of your website files in the File Manager or connect your custom domain with automatic SSL.
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Hosting Execution Node
+                </label>
+                <select
+                  name="server_node_id"
+                  defaultValue={serverNodes.find((n: any) => n.status === "active")?.id || ""}
+                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                >
+                  {serverNodes.map((node: any) => (
+                    <option key={node.id} value={node.id}>
+                      {node.name} ({node.ip_address}) — {node.status === "active" ? "Active (ServerByte)" : node.status}
+                    </option>
+                  ))}
+                  {serverNodes.length === 0 && (
+                    <option value="">DDL Cloud Edge (Serverless)</option>
+                  )}
+                </select>
+              </div>
+
+              <div className="p-3 text-xs text-slate-600 bg-cyan-50/70 border border-cyan-100 rounded-xl space-y-1">
+                <p className="font-semibold text-cyan-800">⚡ Automated ServerByte Sync:</p>
+                <p>Creating this website will immediately generate isolated folder <code>sites/[subdomain]/</code> and live starter assets on ServerByte with zero manual steps.</p>
               </div>
 
               <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
