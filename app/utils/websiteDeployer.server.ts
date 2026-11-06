@@ -242,3 +242,150 @@ export async function deleteAllCloudWebsiteFiles(subdomain: string): Promise<{ d
     return { deletedCount: 0 };
   }
 }
+
+/**
+ * Recursively deletes a specific folder under client-websites/{subdomain}/{folderPath}
+ */
+export async function deleteStorageFolder(subdomain: string, folderPath: string): Promise<number> {
+  const supabaseAdmin = getSupabaseAdminClient();
+  const rootPrefix = `${subdomain}/${folderPath}`.replace(/\/+$/, "");
+
+  async function listAllPaths(folder: string): Promise<string[]> {
+    const { data: items, error } = await supabaseAdmin.storage
+      .from("client-websites")
+      .list(folder, { limit: 1000 });
+
+    if (error || !items || items.length === 0) return [];
+
+    let allFiles: string[] = [];
+    for (const item of items) {
+      const fullPath = `${folder}/${item.name}`;
+      if (item.id) {
+        allFiles.push(fullPath);
+      } else {
+        const nested = await listAllPaths(fullPath);
+        allFiles = allFiles.concat(nested);
+      }
+    }
+    return allFiles;
+  }
+
+  try {
+    const filesToDelete = await listAllPaths(rootPrefix);
+    if (filesToDelete.length > 0) {
+      await supabaseAdmin.storage.from("client-websites").remove(filesToDelete);
+    }
+    return filesToDelete.length;
+  } catch (err) {
+    console.error(`[Storage] Failed to delete folder ${rootPrefix}:`, err);
+    return 0;
+  }
+}
+
+/**
+ * Extracts a ZIP file in place into client-websites/{subdomain}/{currentPath}
+ */
+export async function extractZipArchive(
+  subdomain: string,
+  zipRelativePath: string,
+  currentPath: string = ""
+): Promise<number> {
+  const supabaseAdmin = getSupabaseAdminClient();
+  const storageKey = `${subdomain}/${zipRelativePath}`;
+
+  const { data: zipBlob, error } = await supabaseAdmin.storage
+    .from("client-websites")
+    .download(storageKey);
+
+  if (error || !zipBlob) {
+    throw new Error(`Failed to download ZIP file: ${error?.message || "File not found"}`);
+  }
+
+  const arrayBuffer = await zipBlob.arrayBuffer();
+  const zip = new AdmZip(Buffer.from(arrayBuffer));
+  const entries = zip.getEntries();
+
+  let extractedCount = 0;
+  const targetDir = currentPath ? `${currentPath}/`.replace(/\/+$/, "/") : "";
+
+  for (const entry of entries) {
+    if (entry.isDirectory || entry.entryName.startsWith("__MACOSX") || entry.entryName.includes(".DS_Store")) {
+      continue;
+    }
+
+    const cleanEntryName = entry.entryName.replace(/^(\/|\\)+/, "");
+    const destinationPath = `${subdomain}/${targetDir}${cleanEntryName}`;
+    const contentType = getMimeType(cleanEntryName);
+
+    await supabaseAdmin.storage
+      .from("client-websites")
+      .upload(destinationPath, entry.getData(), {
+        contentType,
+        upsert: true,
+      });
+
+    extractedCount++;
+  }
+
+  return extractedCount;
+}
+
+/**
+ * Compresses selected files and folders into a downloadable ZIP archive
+ */
+export async function compressStorageItems(
+  subdomain: string,
+  relativePaths: string[],
+  currentPath: string = ""
+): Promise<string> {
+  const supabaseAdmin = getSupabaseAdminClient();
+  const zip = new AdmZip();
+
+  for (const relPath of relativePaths) {
+    const fullKey = `${subdomain}/${relPath}`;
+    const itemName = relPath.split("/").pop() || relPath;
+
+    // Check if it's a file by trying to download it
+    const { data: fileBlob } = await supabaseAdmin.storage
+      .from("client-websites")
+      .download(fullKey);
+
+    if (fileBlob) {
+      const buf = Buffer.from(await fileBlob.arrayBuffer());
+      zip.addFile(itemName, buf);
+    } else {
+      // It's likely a directory, list and add files
+      const { data: items } = await supabaseAdmin.storage
+        .from("client-websites")
+        .list(fullKey, { limit: 1000 });
+
+      if (items) {
+        for (const item of items) {
+          if (item.id) {
+            const nestedKey = `${fullKey}/${item.name}`;
+            const { data: subBlob } = await supabaseAdmin.storage
+              .from("client-websites")
+              .download(nestedKey);
+            if (subBlob) {
+              const subBuf = Buffer.from(await subBlob.arrayBuffer());
+              zip.addFile(`${itemName}/${item.name}`, subBuf);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const archiveName = `archive-${Date.now().toString(36)}.zip`;
+  const targetDir = currentPath ? `${currentPath}/`.replace(/\/+$/, "/") : "";
+  const uploadKey = `${subdomain}/${targetDir}${archiveName}`;
+
+  await supabaseAdmin.storage
+    .from("client-websites")
+    .upload(uploadKey, zip.toBuffer(), {
+      contentType: "application/zip",
+      upsert: true,
+    });
+
+  return archiveName;
+}
