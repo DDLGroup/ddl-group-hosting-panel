@@ -4,6 +4,12 @@ import { useState } from "react";
 import Button from "~/components/Button";
 import TextField from "~/components/TextField";
 import { requireUserProfile } from "~/utils/auth.server";
+import {
+  deleteDatabaseSecret,
+  generateSecurePassword,
+  getDatabaseSecret,
+  setDatabaseSecret,
+} from "~/utils/databaseSecrets.server";
 import { formatDate } from "~/utils/formatDate";
 import { getSupabaseAdminClient } from "~/utils/supabase.server";
 
@@ -35,8 +41,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
     supabaseAdmin.from("server_nodes").select("id, name, hostname, ip_address, status"),
   ]);
 
+  const rawDbs = dbRes.data || [];
+  const databasesWithPasswords = await Promise.all(
+    rawDbs.map(async (db: any) => {
+      const password = await getDatabaseSecret(db.id);
+      return {
+        ...db,
+        database_password: password,
+      };
+    })
+  );
+
   return Response.json({
-    databases: dbRes.data || [],
+    databases: databasesWithPasswords,
     projects: projectsRes.data || [],
     serverNodes: nodesRes.data || [],
   });
@@ -53,6 +70,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const dbUser = formData.get("db_user");
     const projectId = formData.get("project_id");
     const serverNodeId = formData.get("server_node_id");
+    let dbPassword = String(formData.get("db_password") || "").trim();
 
     if (
       typeof dbName !== "string" ||
@@ -63,23 +81,62 @@ export async function action({ request }: ActionFunctionArgs) {
       return Response.json({ error: "Database name and username are required." }, { status: 400 });
     }
 
+    if (!dbPassword) {
+      dbPassword = generateSecurePassword();
+    }
+
     const cleanDbName = dbName.trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
     const cleanUser = dbUser.trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
 
-    const { error } = await supabaseAdmin.from("databases").insert({
-      customer_id: profile.id,
-      project_id: projectId ? String(projectId) : null,
-      server_node_id: serverNodeId ? String(serverNodeId) : null,
-      database_name: `ddl_${cleanDbName}`,
-      database_user: `usr_${cleanUser}`,
-      status: "active",
-    });
+    const { data: newDb, error } = await supabaseAdmin
+      .from("databases")
+      .insert({
+        customer_id: profile.id,
+        project_id: projectId ? String(projectId) : null,
+        server_node_id: serverNodeId ? String(serverNodeId) : null,
+        database_name: `ddl_${cleanDbName}`,
+        database_user: `usr_${cleanUser}`,
+        status: "active",
+      })
+      .select()
+      .single();
 
     if (error) {
       return Response.json({ error: error.message }, { status: 500 });
     }
 
+    if (newDb?.id) {
+      await setDatabaseSecret(newDb.id, dbPassword);
+    }
+
     return Response.json({ success: `MySQL database "ddl_${cleanDbName}" created successfully!` });
+  }
+
+  if (intent === "update_db_password") {
+    const dbId = String(formData.get("database_id") || "");
+    const newPassword = String(formData.get("new_password") || "").trim();
+
+    if (!dbId || !newPassword) {
+      return Response.json({ error: "Database ID and new password are required." }, { status: 400 });
+    }
+
+    if (newPassword.length < 6) {
+      return Response.json({ error: "Password must be at least 6 characters." }, { status: 400 });
+    }
+
+    // Verify ownership
+    let q = supabaseAdmin.from("databases").select("id, database_name").eq("id", dbId);
+    if (profile.role === "customer") {
+      q = q.eq("customer_id", profile.id);
+    }
+
+    const { data: db, error: fetchErr } = await q.maybeSingle();
+    if (fetchErr || !db) {
+      return Response.json({ error: "Database not found or access denied." }, { status: 404 });
+    }
+
+    await setDatabaseSecret(dbId, newPassword);
+    return Response.json({ success: `Password for database "${db.database_name}" updated successfully!` });
   }
 
   if (intent === "delete_db") {
@@ -93,6 +150,7 @@ export async function action({ request }: ActionFunctionArgs) {
       return Response.json({ error: error.message }, { status: 500 });
     }
 
+    await deleteDatabaseSecret(dbId);
     return Response.json({ success: "MySQL database deleted successfully." });
   }
 
@@ -103,8 +161,19 @@ export default function Databases() {
   const { databases, projects, serverNodes } = useLoaderData<typeof loader>();
   const actionData = useActionData<{ error?: string; success?: string }>();
   const navigation = useNavigation();
+
+  // Modals state
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedDb, setSelectedDb] = useState<any>(null);
+  const [editingPasswordDb, setEditingPasswordDb] = useState<any>(null);
+
+  // Password fields state
+  const [createDbPassword, setCreateDbPassword] = useState("");
+  const [showCreatePassword, setShowCreatePassword] = useState(false);
+  const [newPasswordVal, setNewPasswordVal] = useState("");
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showCredsPassword, setShowCredsPassword] = useState(false);
+
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const isSubmitting = navigation.state === "submitting";
 
@@ -112,6 +181,21 @@ export default function Databases() {
     navigator.clipboard.writeText(text);
     setCopiedField(label);
     setTimeout(() => setCopiedField(null), 2000);
+  };
+
+  const handleGeneratePassword = (target: "create" | "update") => {
+    const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*";
+    let p = "Ddl_";
+    for (let i = 0; i < 12; i++) {
+      p += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    if (target === "create") {
+      setCreateDbPassword(p);
+      setShowCreatePassword(true);
+    } else {
+      setNewPasswordVal(p);
+      setShowNewPassword(true);
+    }
   };
 
   return (
@@ -122,24 +206,27 @@ export default function Databases() {
             MySQL Databases
           </h1>
           <p className="text-sm text-slate-500">
-            Provision and manage isolated MySQL databases for your WordPress, PHP, and web applications
+            Provision and manage isolated MySQL databases with full credentials management and Web phpMyAdmin
           </p>
         </div>
 
         <div className="flex items-center gap-3">
           <a
-            href="https://cp.serverbyt.in/services/85b8dc9d809f04e0/database/manage-mysql"
+            href="https://panel.ddlg.in/sites/pma/?server=localhost"
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-slate-700 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 shadow-xs transition"
           >
             <span>🗄️</span>
-            <span>Open phpMyAdmin</span>
+            <span>Open Web phpMyAdmin</span>
             <span className="text-xs text-slate-400">↗</span>
           </a>
 
           <button
-            onClick={() => setIsModalOpen(true)}
+            onClick={() => {
+              handleGeneratePassword("create");
+              setIsModalOpen(true);
+            }}
             className="inline-flex items-center justify-center px-4 py-2.5 text-sm font-semibold text-white bg-cyan-600 rounded-xl hover:bg-cyan-700 shadow-sm transition"
           >
             + Provision Database
@@ -217,18 +304,34 @@ export default function Databases() {
                       <div className="flex items-center justify-end gap-2">
                         <button
                           type="button"
-                          onClick={() => setSelectedDb(db)}
+                          onClick={() => {
+                            setSelectedDb(db);
+                            setShowCredsPassword(false);
+                          }}
                           className="px-2.5 py-1 text-xs font-semibold text-cyan-700 bg-cyan-50 border border-cyan-200 rounded-lg hover:bg-cyan-100 transition"
                           title="View Connection String & Credentials"
                         >
                           🔑 Credentials
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingPasswordDb(db);
+                            handleGeneratePassword("update");
+                          }}
+                          className="px-2.5 py-1 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition"
+                          title="Update Database Password"
+                        >
+                          ✏️ Password
+                        </button>
                         <a
-                          href="https://cp.serverbyt.in/services/85b8dc9d809f04e0/database/manage-mysql"
+                          href={`https://panel.ddlg.in/sites/pma/?server=localhost&username=${encodeURIComponent(
+                            db.database_user
+                          )}&db=${encodeURIComponent(db.database_name)}`}
                           target="_blank"
                           rel="noreferrer"
                           className="px-2.5 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition"
-                          title="Open phpMyAdmin Web Manager"
+                          title="Open in Web phpMyAdmin"
                         >
                           phpMyAdmin ↗
                         </a>
@@ -318,6 +421,42 @@ export default function Databases() {
               </div>
 
               <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm font-medium text-slate-700">
+                    Database Password
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => handleGeneratePassword("create")}
+                    className="text-xs font-semibold text-cyan-600 hover:text-cyan-700 transition"
+                  >
+                    🎲 Generate Strong Password
+                  </button>
+                </div>
+                <div className="relative">
+                  <input
+                    type={showCreatePassword ? "text" : "password"}
+                    name="db_password"
+                    value={createDbPassword}
+                    onChange={(e) => setCreateDbPassword(e.target.value)}
+                    required
+                    placeholder="Enter or generate password"
+                    className="w-full px-3 py-2 pr-10 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCreatePassword(!showCreatePassword)}
+                    className="absolute inset-y-0 right-0 px-3 flex items-center text-xs text-slate-400 hover:text-slate-600"
+                  >
+                    {showCreatePassword ? "Hide" : "Show"}
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  You can view and update this password at any time in Credentials.
+                </p>
+              </div>
+
+              <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">
                   Assign to Website Project
                 </label>
@@ -364,6 +503,88 @@ export default function Databases() {
                 </Button>
                 <Button type="submit" loading={isSubmitting}>
                   Provision Database
+                </Button>
+              </div>
+            </Form>
+          </div>
+        </div>
+      )}
+
+      {/* Update Password Modal */}
+      {editingPasswordDb && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+          <div className="w-full max-w-md p-6 bg-white rounded-2xl shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-4 mb-4 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">🔐</span>
+                <div>
+                  <h2 className="text-lg font-bold text-slate-900">Change Database Password</h2>
+                  <p className="text-xs text-slate-500">{editingPasswordDb.database_name}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingPasswordDb(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold p-1 rounded-lg"
+              >
+                ✕
+              </button>
+            </div>
+
+            <Form
+              method="POST"
+              onSubmit={() => setEditingPasswordDb(null)}
+              className="space-y-4"
+            >
+              <input type="hidden" name="intent" value="update_db_password" />
+              <input type="hidden" name="database_id" value={editingPasswordDb.id} />
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm font-medium text-slate-700">
+                    New Password
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => handleGeneratePassword("update")}
+                    className="text-xs font-semibold text-cyan-600 hover:text-cyan-700 transition"
+                  >
+                    🎲 Generate Strong Password
+                  </button>
+                </div>
+                <div className="relative">
+                  <input
+                    type={showNewPassword ? "text" : "password"}
+                    name="new_password"
+                    value={newPasswordVal}
+                    onChange={(e) => setNewPasswordVal(e.target.value)}
+                    required
+                    placeholder="Enter new password"
+                    className="w-full px-3 py-2 pr-10 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPassword(!showNewPassword)}
+                    className="absolute inset-y-0 right-0 px-3 flex items-center text-xs text-slate-400 hover:text-slate-600"
+                  >
+                    {showNewPassword ? "Hide" : "Show"}
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Remember to update this in your <code>wp-config.php</code> or <code>.env</code> file if used by WordPress or scripts.
+                </p>
+              </div>
+
+              <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
+                <Button
+                  type="button"
+                  variant="outlined"
+                  onClick={() => setEditingPasswordDb(null)}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" loading={isSubmitting}>
+                  Save New Password
                 </Button>
               </div>
             </Form>
@@ -450,14 +671,62 @@ export default function Databases() {
                 </div>
               </div>
 
+              {/* Password field with Show/Hide and Copy */}
+              <div className="p-3.5 bg-cyan-50/60 border border-cyan-200 rounded-xl">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-cyan-800 uppercase block">Database Password</span>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setShowCredsPassword(!showCredsPassword)}
+                      className="text-xs font-semibold text-cyan-700 hover:underline"
+                    >
+                      {showCredsPassword ? "Hide" : "Show Password"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(selectedDb.database_password || "", "password")}
+                      className="text-xs font-semibold text-cyan-700 hover:underline"
+                    >
+                      {copiedField === "password" ? "Copied!" : "Copy Password"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingPasswordDb(selectedDb);
+                        handleGeneratePassword("update");
+                      }}
+                      className="text-xs font-semibold text-amber-700 hover:underline"
+                    >
+                      ✏️ Change
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-1 font-mono font-bold text-slate-900 text-sm tracking-wider select-all">
+                  {showCredsPassword ? selectedDb.database_password : "••••••••••••••••"}
+                </div>
+              </div>
+
               <div>
-                <span className="text-xs font-bold text-slate-700 uppercase block mb-1.5">
-                  WordPress wp-config.php Snippet
-                </span>
-                <pre className="p-3 bg-slate-900 text-cyan-300 font-mono text-xs rounded-xl overflow-x-auto select-all">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs font-bold text-slate-700 uppercase block">
+                    WordPress wp-config.php Snippet
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const snippet = `define( 'DB_NAME', '${selectedDb.database_name}' );\ndefine( 'DB_USER', '${selectedDb.database_user}' );\ndefine( 'DB_PASSWORD', '${selectedDb.database_password || ""}' );\ndefine( 'DB_HOST', 'localhost' );\ndefine( 'DB_CHARSET', 'utf8mb4' );`;
+                      copyToClipboard(snippet, "snippet");
+                    }}
+                    className="text-xs font-semibold text-cyan-600 hover:underline"
+                  >
+                    {copiedField === "snippet" ? "Copied Snippet!" : "Copy Full Snippet"}
+                  </button>
+                </div>
+                <pre className="p-3 bg-slate-900 text-cyan-300 font-mono text-xs rounded-xl overflow-x-auto select-all leading-relaxed">
 {`define( 'DB_NAME', '${selectedDb.database_name}' );
 define( 'DB_USER', '${selectedDb.database_user}' );
-define( 'DB_PASSWORD', 'your_mysql_password' );
+define( 'DB_PASSWORD', '${selectedDb.database_password || ""}' );
 define( 'DB_HOST', 'localhost' );
 define( 'DB_CHARSET', 'utf8mb4' );`}
                 </pre>
@@ -465,12 +734,14 @@ define( 'DB_CHARSET', 'utf8mb4' );`}
 
               <div className="pt-2 flex justify-between items-center border-t border-slate-100">
                 <a
-                  href="https://cp.serverbyt.in/services/85b8dc9d809f04e0/database/manage-mysql"
+                  href={`https://panel.ddlg.in/sites/pma/?server=localhost&username=${encodeURIComponent(
+                    selectedDb.database_user
+                  )}&db=${encodeURIComponent(selectedDb.database_name)}`}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-1.5 text-xs font-semibold text-cyan-700 bg-cyan-50 px-3 py-2 rounded-xl hover:bg-cyan-100 transition"
                 >
-                  <span>🗄️ Manage in phpMyAdmin</span>
+                  <span>🗄️ Manage in Web phpMyAdmin</span>
                   <span>↗</span>
                 </a>
 
