@@ -212,11 +212,14 @@ export default function ServerNodes() {
                       <div className="text-[11px] text-slate-400">{node.ip_address}</div>
                     </td>
                     <td className="py-3.5 px-4 text-xs">
-                      <span className="font-semibold text-slate-800">
+                      <div className="font-semibold text-slate-800">
                         {node.capabilities?.provider === "cpanel"
-                          ? "cPanel Hosting (PHP & MySQL)"
+                          ? "ServerByte (cPanel Linux)"
                           : "VPS Node (Docker/Nginx)"}
-                      </span>
+                      </div>
+                      <div className="text-[11px] text-cyan-700 font-medium mt-0.5">
+                        PHP {node.capabilities?.php_version || "8.2"} • {node.capabilities?.disk_free_mb ? `${Math.round(node.capabilities.disk_free_mb / 1024)} GB Free Space` : "Unlimited Storage"}
+                      </div>
                     </td>
                     <td className="py-3.5 px-4 text-xs">{node.region}</td>
                     <td className="py-3.5 px-4">
