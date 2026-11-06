@@ -8,6 +8,7 @@ import {
 import type { LinksFunction } from "@remix-run/node";
 
 import styles from "~/styles/tailwind.css?url";
+import GlobalPreloader from "~/components/GlobalPreloader";
 
 export const links: LinksFunction = () => [
   { rel: "preconnect", href: "https://fonts.googleapis.com" },
@@ -33,6 +34,7 @@ export default function App() {
         <Links />
       </head>
       <body className="flex flex-col min-h-screen text-slate-700 bg-slate-100">
+        <GlobalPreloader />
         <Outlet />
         <ScrollRestoration />
         <Scripts />
