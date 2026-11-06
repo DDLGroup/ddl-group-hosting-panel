@@ -16,6 +16,7 @@ import {
   deployZipToCloudStorage,
   extractZipArchive,
   getMimeType,
+  syncFilesToExecutionNode,
 } from "~/utils/websiteDeployer.server";
 
 export const meta: MetaFunction = () => {
@@ -176,6 +177,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     let uploadedCount = 0;
+    const filesToSync: Array<{ path: string; buffer: Buffer }> = [];
     for (const f of validFiles) {
       const cleanFileName = f.name.replace(/[^a-zA-Z0-9._-]/g, "_");
       const storageKey = `${project.subdomain}/${targetPrefix}${cleanFileName}`;
@@ -189,7 +191,14 @@ export async function action({ request }: ActionFunctionArgs) {
           upsert: true, // Overwrites ("paste over") existing file
         });
 
-      if (!upErr) uploadedCount++;
+      if (!upErr) {
+        uploadedCount++;
+        filesToSync.push({ path: `${targetPrefix}${cleanFileName}`, buffer });
+      }
+    }
+
+    if (filesToSync.length > 0) {
+      await syncFilesToExecutionNode(project.subdomain, filesToSync);
     }
 
     return Response.json({
@@ -251,6 +260,10 @@ export async function action({ request }: ActionFunctionArgs) {
     if (createErr) {
       return Response.json({ error: createErr.message }, { status: 500 });
     }
+
+    await syncFilesToExecutionNode(project.subdomain, [
+      { path: `${targetPrefix}${cleanFileName}`, buffer },
+    ]);
 
     return Response.json({ success: `File "${cleanFileName}" created successfully!` });
   }

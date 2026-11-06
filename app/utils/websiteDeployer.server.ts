@@ -83,11 +83,106 @@ export async function deployZipToCloudStorage(subdomain: string, zipBuffer: Buff
     }
   }
 
+  // Also auto-sync to assigned server node (e.g. ServerByte) if attached
+  await syncZipBufferToExecutionNode(subdomain, zipBuffer);
+
   return {
     success: true,
     uploadedCount: uploadedFiles.length,
     files: uploadedFiles,
   };
+}
+
+/**
+ * Automatically synchronizes website files to the assigned Execution Node (e.g. ServerByte).
+ * Files are extracted and deployed to public_html/ddl-group-hosting/sites/{subdomain}/*
+ */
+export async function syncFilesToExecutionNode(
+  subdomain: string,
+  files: Array<{ path: string; buffer: Buffer }>
+) {
+  try {
+    const supabaseAdmin = getSupabaseAdminClient();
+    const { data: project } = await supabaseAdmin
+      .from("hosting_projects")
+      .select("id, subdomain, server_node_id")
+      .eq("subdomain", subdomain)
+      .maybeSingle();
+
+    if (!project || !project.server_node_id) return;
+
+    const { data: node } = await supabaseAdmin
+      .from("server_nodes")
+      .select("*")
+      .eq("id", project.server_node_id)
+      .maybeSingle();
+
+    if (!node || !node.capabilities?.bridge_url || !node.capabilities?.token) return;
+
+    // Pack the files into a ZIP archive in memory
+    const zip = new AdmZip();
+    for (const f of files) {
+      zip.addFile(f.path, f.buffer);
+    }
+    const zipBuffer = zip.toBuffer();
+
+    const form = new FormData();
+    form.append("action", "deploy_zip");
+    form.append("slug", subdomain);
+    const blob = new Blob([zipBuffer], { type: "application/zip" });
+    form.append("zip_file", blob, "bundle.zip");
+
+    const res = await fetch(node.capabilities.bridge_url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${node.capabilities.token}`,
+      },
+      body: form,
+    });
+
+    console.log(`[Node Sync] Synced ${files.length} file(s) for ${subdomain} to ${node.name}: HTTP ${res.status}`);
+  } catch (err) {
+    console.warn(`[Node Sync] Error syncing files to execution node:`, err);
+  }
+}
+
+export async function syncZipBufferToExecutionNode(subdomain: string, zipBuffer: Buffer) {
+  try {
+    const supabaseAdmin = getSupabaseAdminClient();
+    const { data: project } = await supabaseAdmin
+      .from("hosting_projects")
+      .select("id, subdomain, server_node_id")
+      .eq("subdomain", subdomain)
+      .maybeSingle();
+
+    if (!project || !project.server_node_id) return;
+
+    const { data: node } = await supabaseAdmin
+      .from("server_nodes")
+      .select("*")
+      .eq("id", project.server_node_id)
+      .maybeSingle();
+
+    if (!node || !node.capabilities?.bridge_url || !node.capabilities?.token) return;
+
+    const form = new FormData();
+    form.append("action", "deploy_zip");
+    form.append("slug", subdomain);
+    const blob = new Blob([zipBuffer], { type: "application/zip" });
+    form.append("zip_file", blob, "bundle.zip");
+
+    const res = await fetch(node.capabilities.bridge_url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${node.capabilities.token}`,
+      },
+      body: form,
+    });
+
+    console.log(`[Node Sync] Deployed ZIP for ${subdomain} to ${node.name}: HTTP ${res.status}`);
+  } catch (err) {
+    console.warn(`[Node Sync] Error deploying ZIP to execution node:`, err);
+  }
 }
 
 /**

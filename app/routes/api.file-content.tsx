@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { requireUserProfile } from "~/utils/auth.server";
 import { getSupabaseAdminClient } from "~/utils/supabase.server";
-import { getMimeType } from "~/utils/websiteDeployer.server";
+import { getMimeType, syncFilesToExecutionNode } from "~/utils/websiteDeployer.server";
 
 function sanitizePath(rawPath: string): string {
   // Remove leading/trailing slashes, disallow path traversal ../
@@ -105,6 +105,9 @@ export async function action({ request }: ActionFunctionArgs) {
   if (uploadErr) {
     return Response.json({ error: uploadErr.message }, { status: 500 });
   }
+
+  // Auto-sync to connected execution node (e.g. ServerByte)
+  await syncFilesToExecutionNode(project.subdomain, [{ path: cleanPath, buffer }]);
 
   return Response.json({
     success: true,
