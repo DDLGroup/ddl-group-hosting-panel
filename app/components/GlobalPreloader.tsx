@@ -27,6 +27,8 @@ export default function GlobalPreloader() {
       label = "Extracting ZIP archive in place...";
     } else if (intent === "create_file" || intent === "create_folder") {
       label = "Creating new item...";
+    } else if (intent === "update_website") {
+      label = "Updating website configuration...";
     } else {
       label = "Processing task, please wait...";
     }

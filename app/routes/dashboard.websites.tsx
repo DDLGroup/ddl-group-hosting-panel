@@ -26,9 +26,16 @@ export async function loader({ request }: LoaderFunctionArgs) {
     query = query.eq("customer_id", profile.id);
   }
 
-  const { data: websites } = await query;
+  const [websitesRes, serverNodesRes] = await Promise.all([
+    query,
+    supabaseAdmin.from("server_nodes").select("id, name, ip_address, status"),
+  ]);
 
-  return Response.json({ websites: websites || [], profile });
+  return Response.json({
+    websites: websitesRes.data || [],
+    serverNodes: serverNodesRes.data || [],
+    profile,
+  });
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -224,14 +231,86 @@ export async function action({ request }: ActionFunctionArgs) {
     });
   }
 
+  if (intent === "update_website") {
+    const projectId = formData.get("project_id");
+    const name = formData.get("name");
+    const subdomain = formData.get("subdomain");
+    const runtime = formData.get("runtime") || "static";
+    const runtimeVersion = formData.get("runtime_version") || "8.2";
+    const status = formData.get("status") || "active";
+    const serverNodeId = formData.get("server_node_id");
+
+    if (typeof projectId !== "string" || !projectId) {
+      return Response.json({ error: "Project ID is required." }, { status: 400 });
+    }
+
+    if (typeof name !== "string" || !name.trim()) {
+      return Response.json({ error: "Website name cannot be empty." }, { status: 400 });
+    }
+
+    let query = supabaseAdmin
+      .from("hosting_projects")
+      .select("id, subdomain, customer_id")
+      .eq("id", projectId);
+
+    if (profile.role === "customer") {
+      query = query.eq("customer_id", profile.id);
+    }
+
+    const { data: project, error: fetchErr } = await query.maybeSingle();
+    if (fetchErr || !project) {
+      return Response.json({ error: "Website not found or access denied." }, { status: 404 });
+    }
+
+    let cleanSubdomain = project.subdomain;
+    if (typeof subdomain === "string" && subdomain.trim()) {
+      const sanitized = subdomain.trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
+      if (sanitized && sanitized !== project.subdomain) {
+        const { data: existingSub } = await supabaseAdmin
+          .from("hosting_projects")
+          .select("id")
+          .eq("subdomain", sanitized)
+          .neq("id", project.id)
+          .maybeSingle();
+
+        if (existingSub) {
+          return Response.json({ error: `Subdomain "${sanitized}" is already taken.` }, { status: 400 });
+        }
+        cleanSubdomain = sanitized;
+      }
+    }
+
+    const { error: updateErr } = await supabaseAdmin
+      .from("hosting_projects")
+      .update({
+        name: name.trim(),
+        subdomain: cleanSubdomain,
+        runtime: runtime as string,
+        runtime_version: runtimeVersion as string,
+        status: status as string,
+        server_node_id: serverNodeId ? (serverNodeId as string) : null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", project.id);
+
+    if (updateErr) {
+      return Response.json({ error: updateErr.message }, { status: 500 });
+    }
+
+    return Response.json({
+      success: `Website "${name.trim()}" configuration updated successfully!`,
+    });
+  }
+
   return Response.json({ error: "Invalid action." }, { status: 400 });
 }
 
 export default function Websites() {
-  const { websites } = useLoaderData<typeof loader>();
+  const { websites, serverNodes } = useLoaderData<typeof loader>();
   const actionData = useActionData<{ error?: string; success?: string }>();
   const navigation = useNavigation();
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingSite, setEditingSite] = useState<any>(null);
   const isSubmitting = navigation.state === "submitting";
 
   const runtimeBadges: Record<string, { label: string; color: string }> = {
@@ -331,7 +410,18 @@ export default function Websites() {
                     <span>Visit Live Site</span>
                     <span>↗</span>
                   </a>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setEditingSite(site)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition"
+                      title={`Edit configuration for ${site.name}`}
+                    >
+                      <svg className="w-3.5 h-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                      <span>Edit</span>
+                    </button>
                     <a
                       href={`/dashboard/files?project=${site.id}`}
                       className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition"
@@ -449,6 +539,157 @@ export default function Websites() {
                 </Button>
                 <Button type="submit" loading={isSubmitting}>
                   Provision Website
+                </Button>
+              </div>
+            </Form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Website Modal */}
+      {editingSite && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+          <div className="w-full max-w-lg p-6 bg-white rounded-2xl shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-4 mb-4 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-cyan-50 text-cyan-600 rounded-lg">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-slate-900">Edit Website Settings</h2>
+                  <p className="text-xs text-slate-500">Configure parameters for {editingSite.name}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingSite(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold p-1 rounded-lg hover:bg-slate-100"
+              >
+                ✕
+              </button>
+            </div>
+
+            <Form
+              method="POST"
+              onSubmit={() => setEditingSite(null)}
+              className="space-y-4"
+            >
+              <input type="hidden" name="intent" value="update_website" />
+              <input type="hidden" name="project_id" value={editingSite.id} />
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Website Project Name
+                </label>
+                <input
+                  type="text"
+                  name="name"
+                  defaultValue={editingSite.name}
+                  required
+                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Subdomain Slug
+                </label>
+                <div className="flex items-center">
+                  <input
+                    type="text"
+                    name="subdomain"
+                    defaultValue={editingSite.subdomain}
+                    required
+                    className="flex-1 px-3 py-2 text-sm border border-slate-200 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  />
+                  <span className="px-3 py-2 text-xs font-semibold text-slate-500 bg-slate-100 border border-l-0 border-slate-200 rounded-r-lg">
+                    .ddlgroup.host
+                  </span>
+                </div>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Default site URL: https://{editingSite.subdomain}.ddlgroup.host
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Runtime Stack
+                  </label>
+                  <select
+                    name="runtime"
+                    defaultValue={editingSite.runtime || "static"}
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  >
+                    <option value="static">Static (HTML/CSS/JS)</option>
+                    <option value="php">PHP Engine</option>
+                    <option value="python">Python Engine</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Version
+                  </label>
+                  <select
+                    name="runtime_version"
+                    defaultValue={editingSite.runtime_version || "8.2"}
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  >
+                    <option value="8.2">8.2 (Recommended)</option>
+                    <option value="8.3">8.3 (Latest)</option>
+                    <option value="8.1">8.1 (LTS)</option>
+                    <option value="7.4">7.4 (Legacy)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Execution Node / Host
+                  </label>
+                  <select
+                    name="server_node_id"
+                    defaultValue={editingSite.server_node_id || ""}
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  >
+                    <option value="">⚡ Serverless Edge (Default)</option>
+                    {serverNodes && serverNodes.map((node: any) => (
+                      <option key={node.id} value={node.id}>
+                        🖥️ {node.name} ({node.ip_address})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Website Status
+                  </label>
+                  <select
+                    name="status"
+                    defaultValue={editingSite.status || "active"}
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  >
+                    <option value="active">🟢 Active</option>
+                    <option value="suspended">🟡 Suspended / Maintenance</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
+                <Button
+                  type="button"
+                  variant="outlined"
+                  onClick={() => setEditingSite(null)}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" loading={isSubmitting}>
+                  Save Changes
                 </Button>
               </div>
             </Form>
