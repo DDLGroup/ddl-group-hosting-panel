@@ -161,127 +161,9 @@ export async function action({ request }: ActionFunctionArgs) {
       return Response.json({ error: createError.message }, { status: 500 });
     }
 
-    // Auto-provision on ServerByte & initialize starter index.html
+    // Auto-provision clean, empty website directory on ServerByte
     if (project) {
-      // 1. Provision folder on ServerByte
       await provisionExecutionNodeSite(cleanSubdomain, serverNodeId);
-
-      // 2. Generate initial modern starter index.html
-      const starterHtml = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${name.trim()} - DDL Group Hosting</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: linear-gradient(135deg, #090d16 0%, #0f172a 100%);
-      color: #f8fafc;
-      padding: 1.5rem;
-    }
-    .card {
-      background: rgba(30, 41, 59, 0.7);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 1.25rem;
-      padding: 3rem 2.5rem;
-      max-width: 540px;
-      width: 100%;
-      text-align: center;
-      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-    }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.35rem 0.85rem;
-      background: rgba(6, 182, 212, 0.15);
-      border: 1px solid rgba(6, 182, 212, 0.3);
-      color: #22d3ee;
-      border-radius: 9999px;
-      font-size: 0.8rem;
-      font-weight: 600;
-      margin-bottom: 1.5rem;
-    }
-    .badge-dot {
-      width: 8px;
-      height: 8px;
-      background: #22d3ee;
-      border-radius: 50%;
-      box-shadow: 0 0 10px #22d3ee;
-    }
-    h1 {
-      font-size: 2rem;
-      font-weight: 800;
-      letter-spacing: -0.025em;
-      margin-bottom: 0.75rem;
-      background: linear-gradient(to right, #ffffff, #cbd5e1);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-    p {
-      color: #94a3b8;
-      font-size: 0.95rem;
-      line-height: 1.6;
-      margin-bottom: 1.5rem;
-    }
-    .url-pill {
-      display: inline-block;
-      padding: 0.5rem 1rem;
-      background: #0f172a;
-      border: 1px solid #334155;
-      border-radius: 0.5rem;
-      color: #38bdf8;
-      font-family: monospace;
-      font-size: 0.9rem;
-      word-break: break-all;
-      margin-bottom: 1.5rem;
-    }
-    .footer {
-      font-size: 0.8rem;
-      color: #64748b;
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
-      padding-top: 1.25rem;
-    }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="badge">
-      <span class="badge-dot"></span>
-      <span>DDL Group Hosting Active</span>
-    </div>
-    <h1>${name.trim()}</h1>
-    <div class="url-pill">https://${cleanSubdomain}.ddlgroup.host</div>
-    <p>Your website environment has been automatically generated on the ServerByte production node. Upload your HTML, PHP, or ZIP archive in the File Manager to make your site live!</p>
-    <div class="footer">
-      Powered by DDL Group Hosting Panel &bull; High Performance Cloud
-    </div>
-  </div>
-</body>
-</html>`;
-
-      const starterBuffer = Buffer.from(starterHtml, "utf-8");
-
-      // Save to Supabase Storage
-      await supabaseAdmin.storage
-        .from("client-websites")
-        .upload(`${cleanSubdomain}/index.html`, starterBuffer, {
-          contentType: "text/html; charset=utf-8",
-          upsert: true,
-        });
-
-      // Sync starter file to execution node (ServerByte)
-      await syncFilesToExecutionNode(cleanSubdomain, [
-        { path: "index.html", buffer: starterBuffer },
-      ]);
 
       await supabaseAdmin.from("deployments").insert({
         project_id: project.id,
@@ -289,7 +171,7 @@ export async function action({ request }: ActionFunctionArgs) {
         runtime: runtime as string,
         source_type: "manual",
         status: "deployed",
-        commit_message: "Auto-provisioned environment and initial starter template",
+        commit_message: "Auto-provisioned clean website directory on ServerByte",
         deployed_by: profile.id,
       });
     }

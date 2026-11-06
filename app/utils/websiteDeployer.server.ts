@@ -139,9 +139,15 @@ export async function provisionExecutionNodeSite(
       return { success: false, message: "Node missing bridge credentials" };
     }
 
+    // Create clean, empty website directory on ServerByte using empty bundle deploy
+    const zip = new AdmZip();
+    const zipBuffer = zip.toBuffer();
+
     const form = new FormData();
-    form.append("action", "provision_site");
+    form.append("action", "deploy_zip");
     form.append("slug", subdomain);
+    const blob = new Blob([zipBuffer], { type: "application/zip" });
+    form.append("zip_file", blob, "bundle.zip");
 
     const res = await fetch(node.capabilities.bridge_url, {
       method: "POST",
@@ -152,8 +158,8 @@ export async function provisionExecutionNodeSite(
     });
 
     const resData = await res.json().catch(() => ({}));
-    console.log(`[Node Provision] Provisioned ${subdomain} on ${node.name}: HTTP ${res.status}`, resData);
-    return { success: res.ok, message: resData?.message || "Provisioned" };
+    console.log(`[Node Provision] Provisioned clean empty directory ${subdomain} on ${node.name}: HTTP ${res.status}`, resData);
+    return { success: res.ok, message: resData?.message || "Clean directory provisioned" };
   } catch (err: any) {
     console.warn(`[Node Provision] Error provisioning site on execution node:`, err);
     return { success: false, message: err?.message || "Unknown error" };
