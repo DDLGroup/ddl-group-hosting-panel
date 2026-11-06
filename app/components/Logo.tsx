@@ -3,8 +3,14 @@ import { Link } from "@remix-run/react";
 const Logo = () => {
   return (
     <Link to="/dashboard" className="flex items-center gap-3 group">
-      <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-600 text-white shadow-md shadow-cyan-500/20">
+      <div
+        className="flex items-center justify-center w-10 h-10 min-w-10 min-h-10 rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-600 text-white shadow-md shadow-cyan-500/20 overflow-hidden shrink-0"
+        style={{ width: "40px", height: "40px", minWidth: "40px", minHeight: "40px" }}
+      >
         <svg
+          width="24"
+          height="24"
+          style={{ width: "24px", height: "24px", maxWidth: "24px", maxHeight: "24px" }}
           className="w-6 h-6"
           fill="none"
           viewBox="0 0 24 24"

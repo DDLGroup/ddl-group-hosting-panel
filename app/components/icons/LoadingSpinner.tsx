@@ -1,6 +1,9 @@
 export default function LoadingSpinner() {
   return (
     <svg
+      width="20"
+      height="20"
+      style={{ width: "20px", height: "20px" }}
       className="h-5 w-5 animate-spin text-slate-500"
       xmlns="http://www.w3.org/2000/svg"
       fill="none"
