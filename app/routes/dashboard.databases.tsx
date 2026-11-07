@@ -1,20 +1,23 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "@remix-run/node";
-import { Form, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
+import { Form, useActionData, useLoaderData, useNavigation, useSubmit } from "@remix-run/react";
 import { useState } from "react";
 import Button from "~/components/Button";
 import TextField from "~/components/TextField";
 import { requireUserProfile } from "~/utils/auth.server";
 import {
+  DEFAULT_CLUSTER_HOST,
+  DEFAULT_CLUSTER_PORT,
   deleteDatabaseSecret,
   generateSecurePassword,
-  getDatabaseSecret,
-  setDatabaseSecret,
+  getDatabaseDetails,
+  setDatabaseDetails,
+  testMySQLConnection,
 } from "~/utils/databaseSecrets.server";
 import { formatDate } from "~/utils/formatDate";
 import { getSupabaseAdminClient } from "~/utils/supabase.server";
 
 export const meta: MetaFunction = () => {
-  return [{ title: "Databases | DDL Group Hosting Panel" }];
+  return [{ title: "MySQL Databases | DDL Group Hosting Panel" }];
 };
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -42,20 +45,23 @@ export async function loader({ request }: LoaderFunctionArgs) {
   ]);
 
   const rawDbs = dbRes.data || [];
-  const databasesWithPasswords = await Promise.all(
+  const databasesWithDetails = await Promise.all(
     rawDbs.map(async (db: any) => {
-      const password = await getDatabaseSecret(db.id);
+      const details = await getDatabaseDetails(db.id);
       return {
         ...db,
-        database_password: password,
+        database_password: details.database_password,
+        database_host: details.database_host || DEFAULT_CLUSTER_HOST,
+        database_port: details.database_port || DEFAULT_CLUSTER_PORT,
       };
     })
   );
 
   return Response.json({
-    databases: databasesWithPasswords,
+    databases: databasesWithDetails,
     projects: projectsRes.data || [],
     serverNodes: nodesRes.data || [],
+    defaultHost: DEFAULT_CLUSTER_HOST,
   });
 }
 
@@ -65,19 +71,43 @@ export async function action({ request }: ActionFunctionArgs) {
   const intent = formData.get("intent");
   const supabaseAdmin = getSupabaseAdminClient();
 
+  // Test Connection Action
+  if (intent === "test_connection") {
+    const host = String(formData.get("db_host") || DEFAULT_CLUSTER_HOST).trim();
+    const user = String(formData.get("db_user") || "").trim();
+    const pass = String(formData.get("db_password") || "").trim();
+    const db = String(formData.get("db_name") || "").trim();
+    const port = parseInt(String(formData.get("db_port") || "3306"), 10);
+
+    if (!user) {
+      return Response.json({ testError: "Username is required to test MySQL connection." }, { status: 400 });
+    }
+
+    const result = await testMySQLConnection({ host, user, pass, db, port });
+    if (!result.success) {
+      return Response.json({
+        testError: `Connection Failed: ${result.error || "Unknown MySQL error"} (Host: ${result.host_used})`,
+      });
+    }
+
+    return Response.json({
+      testSuccess: `Connection Verified! Connected to ${result.version || "MariaDB"} on ${result.host_used}${
+        result.tables_count !== undefined ? ` (${result.tables_count} tables detected)` : ""
+      }`,
+    });
+  }
+
+  // Create Database Action
   if (intent === "create_db") {
-    const dbName = formData.get("db_name");
-    const dbUser = formData.get("db_user");
+    const rawDbName = String(formData.get("db_name") || "").trim();
+    const rawDbUser = String(formData.get("db_user") || "").trim();
+    const dbHost = String(formData.get("db_host") || DEFAULT_CLUSTER_HOST).trim();
+    const dbPort = parseInt(String(formData.get("db_port") || "3306"), 10);
     const projectId = formData.get("project_id");
     const serverNodeId = formData.get("server_node_id");
     let dbPassword = String(formData.get("db_password") || "").trim();
 
-    if (
-      typeof dbName !== "string" ||
-      typeof dbUser !== "string" ||
-      !dbName.trim() ||
-      !dbUser.trim()
-    ) {
+    if (!rawDbName || !rawDbUser) {
       return Response.json({ error: "Database name and username are required." }, { status: 400 });
     }
 
@@ -85,8 +115,9 @@ export async function action({ request }: ActionFunctionArgs) {
       dbPassword = generateSecurePassword();
     }
 
-    const cleanDbName = dbName.trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
-    const cleanUser = dbUser.trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
+    // Preserve valid database naming conventions
+    const cleanDbName = rawDbName.replace(/[^a-zA-Z0-9_\-]/g, "");
+    const cleanUser = rawDbUser.replace(/[^a-zA-Z0-9_\-]/g, "");
 
     const { data: newDb, error } = await supabaseAdmin
       .from("databases")
@@ -94,8 +125,8 @@ export async function action({ request }: ActionFunctionArgs) {
         customer_id: profile.id,
         project_id: projectId ? String(projectId) : null,
         server_node_id: serverNodeId ? String(serverNodeId) : null,
-        database_name: `ddl_${cleanDbName}`,
-        database_user: `usr_${cleanUser}`,
+        database_name: cleanDbName,
+        database_user: cleanUser,
         status: "active",
       })
       .select()
@@ -106,15 +137,23 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     if (newDb?.id) {
-      await setDatabaseSecret(newDb.id, dbPassword);
+      await setDatabaseDetails(newDb.id, {
+        database_password: dbPassword,
+        database_host: dbHost,
+        database_port: dbPort,
+      });
     }
 
-    return Response.json({ success: `MySQL database "ddl_${cleanDbName}" created successfully!` });
+    return Response.json({
+      success: `MySQL database "${cleanDbName}" registered successfully on cluster host ${dbHost}!`,
+    });
   }
 
+  // Update Password Action
   if (intent === "update_db_password") {
     const dbId = String(formData.get("database_id") || "");
     const newPassword = String(formData.get("new_password") || "").trim();
+    const newHost = String(formData.get("db_host") || "").trim();
 
     if (!dbId || !newPassword) {
       return Response.json({ error: "Database ID and new password are required." }, { status: 400 });
@@ -135,10 +174,17 @@ export async function action({ request }: ActionFunctionArgs) {
       return Response.json({ error: "Database not found or access denied." }, { status: 404 });
     }
 
-    await setDatabaseSecret(dbId, newPassword);
-    return Response.json({ success: `Password for database "${db.database_name}" updated successfully!` });
+    const current = await getDatabaseDetails(dbId);
+    await setDatabaseDetails(dbId, {
+      database_password: newPassword,
+      database_host: newHost || current.database_host || DEFAULT_CLUSTER_HOST,
+      database_port: current.database_port || DEFAULT_CLUSTER_PORT,
+    });
+
+    return Response.json({ success: `Password and credentials for "${db.database_name}" updated successfully!` });
   }
 
+  // Delete Database Action
   if (intent === "delete_db") {
     const dbId = formData.get("database_id");
     if (typeof dbId !== "string" || !dbId) {
@@ -158,9 +204,15 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function Databases() {
-  const { databases, projects, serverNodes } = useLoaderData<typeof loader>();
-  const actionData = useActionData<{ error?: string; success?: string }>();
+  const { databases, projects, serverNodes, defaultHost } = useLoaderData<typeof loader>();
+  const actionData = useActionData<{
+    error?: string;
+    success?: string;
+    testError?: string;
+    testSuccess?: string;
+  }>();
   const navigation = useNavigation();
+  const submit = useSubmit();
 
   // Modals state
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -168,8 +220,13 @@ export default function Databases() {
   const [editingPasswordDb, setEditingPasswordDb] = useState<any>(null);
 
   // Password fields state
+  const [createDbName, setCreateDbName] = useState("");
+  const [createDbUser, setCreateDbUser] = useState("");
+  const [createDbHost, setCreateDbHost] = useState(defaultHost);
   const [createDbPassword, setCreateDbPassword] = useState("");
   const [showCreatePassword, setShowCreatePassword] = useState(false);
+
+  const [editDbHost, setEditDbHost] = useState("");
   const [newPasswordVal, setNewPasswordVal] = useState("");
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showCredsPassword, setShowCredsPassword] = useState(false);
@@ -198,21 +255,47 @@ export default function Databases() {
     }
   };
 
+  const handleCopyAndLaunchPma = (db: any) => {
+    if (db.database_password) {
+      navigator.clipboard.writeText(db.database_password);
+      setCopiedField("pma_launch");
+      setTimeout(() => setCopiedField(null), 2500);
+    }
+    const pmaUrl = `https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(
+      db.database_host || defaultHost
+    )}&username=${encodeURIComponent(db.database_user)}&db=${encodeURIComponent(db.database_name)}`;
+    window.open(pmaUrl, "_blank");
+  };
+
+  const handleTestConnection = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const form = new FormData();
+    form.append("intent", "test_connection");
+    form.append("db_host", createDbHost);
+    form.append("db_user", createDbUser);
+    form.append("db_password", createDbPassword);
+    form.append("db_name", createDbName);
+    submit(form, { method: "POST" });
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-            MySQL Databases
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
+            <span>MySQL Databases</span>
+            <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-cyan-100 text-cyan-800 border border-cyan-200">
+              Cluster Ready
+            </span>
           </h1>
           <p className="text-sm text-slate-500">
-            Provision and manage isolated MySQL databases with full credentials management and Web phpMyAdmin
+            High-performance isolated MySQL databases with full credentials management and White-Label Web phpMyAdmin
           </p>
         </div>
 
         <div className="flex items-center gap-3">
           <a
-            href="https://panel.ddlg.in/sites/pma/?server=localhost"
+            href={`https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(defaultHost)}`}
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-slate-700 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 shadow-xs transition"
@@ -225,6 +308,7 @@ export default function Databases() {
           <button
             onClick={() => {
               handleGeneratePassword("create");
+              setCreateDbHost(defaultHost);
               setIsModalOpen(true);
             }}
             className="inline-flex items-center justify-center px-4 py-2.5 text-sm font-semibold text-white bg-cyan-600 rounded-xl hover:bg-cyan-700 shadow-sm transition"
@@ -234,15 +318,62 @@ export default function Databases() {
         </div>
       </div>
 
+      {/* Cluster Guidance Card */}
+      <div className="p-4 bg-gradient-to-r from-slate-900 to-slate-800 text-white rounded-2xl shadow-sm border border-slate-700 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            <span className="text-xs uppercase tracking-wider font-bold text-cyan-400">
+              Cluster Database Engine (MariaDB 10.11)
+            </span>
+          </div>
+          <p className="text-sm text-slate-200">
+            Web nodes and database clusters communicate over secure private cluster networks.
+          </p>
+          <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3 pt-1">
+            <span>
+              Primary Cluster Host: <code className="text-cyan-300 font-mono font-bold">{defaultHost}</code>
+            </span>
+            <span>•</span>
+            <span>Port: <code className="text-cyan-300 font-mono">3306</code></span>
+            <span>•</span>
+            <span>Manager: <code className="text-cyan-300 font-mono">panel.ddlg.in/sites/pma/</code></span>
+          </div>
+        </div>
+        <div className="shrink-0 flex items-center gap-2">
+          <a
+            href={`https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(defaultHost)}`}
+            target="_blank"
+            rel="noreferrer"
+            className="px-3.5 py-2 text-xs font-bold text-slate-900 bg-cyan-400 hover:bg-cyan-300 rounded-xl transition shadow-xs flex items-center gap-1.5"
+          >
+            <span>Launch phpMyAdmin</span>
+            <span>↗</span>
+          </a>
+        </div>
+      </div>
+
       {actionData?.error && (
-        <div className="p-4 text-sm font-medium text-rose-700 bg-rose-50 border border-rose-200 rounded-xl">
-          {actionData.error}
+        <div className="p-4 text-sm font-medium text-rose-700 bg-rose-50 border border-rose-200 rounded-xl flex items-center justify-between">
+          <span>{actionData.error}</span>
         </div>
       )}
 
       {actionData?.success && (
         <div className="p-4 text-sm font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-xl">
           {actionData.success}
+        </div>
+      )}
+
+      {actionData?.testError && (
+        <div className="p-4 text-sm font-medium text-amber-900 bg-amber-50 border border-amber-300 rounded-xl">
+          ⚠️ {actionData.testError}
+        </div>
+      )}
+
+      {actionData?.testSuccess && (
+        <div className="p-4 text-sm font-medium text-emerald-800 bg-emerald-50 border border-emerald-300 rounded-xl">
+          ✅ {actionData.testSuccess}
         </div>
       )}
 
@@ -253,7 +384,7 @@ export default function Databases() {
               <tr>
                 <th className="py-3.5 px-4">Database Name</th>
                 <th className="py-3.5 px-4">Username</th>
-                <th className="py-3.5 px-4">Host / Port</th>
+                <th className="py-3.5 px-4">Cluster Host : Port</th>
                 <th className="py-3.5 px-4">Mapped Website</th>
                 <th className="py-3.5 px-4">Server Node</th>
                 <th className="py-3.5 px-4">Status</th>
@@ -268,7 +399,9 @@ export default function Databases() {
                       <span className="text-xl">🗄️</span>
                     </div>
                     <div className="font-semibold text-slate-700">No MySQL databases provisioned yet</div>
-                    <p className="text-xs text-slate-400 mt-1">Create a database instance to connect with WordPress, Laravel, or PHP scripts.</p>
+                    <p className="text-xs text-slate-400 mt-1">
+                      Register or attach a database instance to connect with WordPress, Laravel, or PHP scripts.
+                    </p>
                   </td>
                 </tr>
               ) : (
@@ -280,8 +413,8 @@ export default function Databases() {
                     <td className="py-3.5 px-4 font-mono text-xs text-slate-600">
                       {db.database_user}
                     </td>
-                    <td className="py-3.5 px-4 font-mono text-xs text-slate-500">
-                      localhost:3306
+                    <td className="py-3.5 px-4 font-mono text-xs text-cyan-800">
+                      {db.database_host || defaultHost}:{db.database_port || 3306}
                     </td>
                     <td className="py-3.5 px-4 text-xs font-medium text-slate-700">
                       {db.hosting_projects?.name ? (
@@ -317,6 +450,7 @@ export default function Databases() {
                           type="button"
                           onClick={() => {
                             setEditingPasswordDb(db);
+                            setEditDbHost(db.database_host || defaultHost);
                             handleGeneratePassword("update");
                           }}
                           className="px-2.5 py-1 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition"
@@ -324,17 +458,14 @@ export default function Databases() {
                         >
                           ✏️ Password
                         </button>
-                        <a
-                          href={`https://panel.ddlg.in/sites/pma/?server=localhost&username=${encodeURIComponent(
-                            db.database_user
-                          )}&db=${encodeURIComponent(db.database_name)}`}
-                          target="_blank"
-                          rel="noreferrer"
+                        <button
+                          type="button"
+                          onClick={() => handleCopyAndLaunchPma(db)}
                           className="px-2.5 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition"
-                          title="Open in Web phpMyAdmin"
+                          title="Copy Password & Open in Web phpMyAdmin"
                         >
                           phpMyAdmin ↗
-                        </a>
+                        </button>
                         <Form
                           method="POST"
                           onSubmit={(e) => {
@@ -366,9 +497,12 @@ export default function Databases() {
       {/* Provision Database Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
-          <div className="w-full max-w-lg p-6 bg-white rounded-2xl shadow-2xl border border-slate-200">
+          <div className="w-full max-w-lg p-6 bg-white rounded-2xl shadow-2xl border border-slate-200 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-4 mb-4 border-b border-slate-100">
-              <h2 className="text-lg font-bold text-slate-900">Provision MySQL Database</h2>
+              <div>
+                <h2 className="text-lg font-bold text-slate-900">Provision / Connect MySQL Database</h2>
+                <p className="text-xs text-slate-500">Configure database credentials for your web applications</p>
+              </div>
               <button
                 onClick={() => setIsModalOpen(false)}
                 className="text-slate-400 hover:text-slate-600 font-bold"
@@ -385,37 +519,56 @@ export default function Databases() {
               <input type="hidden" name="intent" value="create_db" />
 
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">
-                  Database Name Suffix
-                </label>
-                <div className="flex items-center">
-                  <span className="px-3 py-2 text-xs font-semibold text-slate-500 bg-slate-100 border border-r-0 border-slate-200 rounded-l-lg">
-                    ddl_
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm font-medium text-slate-700">
+                    MySQL Host / Cluster Host
+                  </label>
+                  <span className="text-[11px] font-semibold text-cyan-700 bg-cyan-50 px-2 py-0.5 rounded border border-cyan-200">
+                    ServerByte Cluster
                   </span>
+                </div>
+                <input
+                  type="text"
+                  name="db_host"
+                  value={createDbHost}
+                  onChange={(e) => setCreateDbHost(e.target.value)}
+                  required
+                  placeholder={defaultHost}
+                  className="w-full px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500 bg-slate-50"
+                />
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Do not use <code>localhost</code>. ServerByte databases run on dedicated cluster hostnames.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Database Name
+                  </label>
                   <input
                     type="text"
                     name="db_name"
+                    value={createDbName}
+                    onChange={(e) => setCreateDbName(e.target.value)}
                     required
-                    placeholder="wordpress_db"
-                    className="flex-1 px-3 py-2 text-sm border border-slate-200 rounded-r-lg focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                    placeholder="e.g. ddl_store_db"
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500"
                   />
                 </div>
-              </div>
 
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">
-                  Database User Suffix
-                </label>
-                <div className="flex items-center">
-                  <span className="px-3 py-2 text-xs font-semibold text-slate-500 bg-slate-100 border border-r-0 border-slate-200 rounded-l-lg">
-                    usr_
-                  </span>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Database Username
+                  </label>
                   <input
                     type="text"
                     name="db_user"
+                    value={createDbUser}
+                    onChange={(e) => setCreateDbUser(e.target.value)}
                     required
-                    placeholder="wp_admin"
-                    className="flex-1 px-3 py-2 text-sm border border-slate-200 rounded-r-lg focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                    placeholder="e.g. usr_store_admin"
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500"
                   />
                 </div>
               </div>
@@ -451,9 +604,6 @@ export default function Databases() {
                     {showCreatePassword ? "Hide" : "Show"}
                   </button>
                 </div>
-                <p className="mt-1 text-[11px] text-slate-400">
-                  You can view and update this password at any time in Credentials.
-                </p>
               </div>
 
               <div>
@@ -475,7 +625,7 @@ export default function Databases() {
 
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">
-                  Host Execution Server
+                  Host Execution Server Node
                 </label>
                 <select
                   name="server_node_id"
@@ -489,8 +639,19 @@ export default function Databases() {
                 </select>
               </div>
 
-              <div className="p-3 text-xs text-slate-500 bg-cyan-50/60 border border-cyan-100 rounded-xl">
-                ℹ️ MySQL runs on port 3306 on your ServerByte Linux node. You can connect your WordPress, Laravel, or PHP scripts using Host <code>localhost</code>.
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between">
+                <div>
+                  <div className="text-xs font-bold text-slate-700">Verify MySQL Connection</div>
+                  <div className="text-[11px] text-slate-400">Tests connection over TCP port 3306</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleTestConnection}
+                  disabled={isSubmitting}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-100 shadow-xs transition"
+                >
+                  {isSubmitting ? "Testing..." : "Test Connection"}
+                </button>
               </div>
 
               <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
@@ -502,7 +663,7 @@ export default function Databases() {
                   Cancel
                 </Button>
                 <Button type="submit" loading={isSubmitting}>
-                  Provision Database
+                  Save & Provision Database
                 </Button>
               </div>
             </Form>
@@ -518,7 +679,7 @@ export default function Databases() {
               <div className="flex items-center gap-2">
                 <span className="text-xl">🔐</span>
                 <div>
-                  <h2 className="text-lg font-bold text-slate-900">Change Database Password</h2>
+                  <h2 className="text-lg font-bold text-slate-900">Update Credentials</h2>
                   <p className="text-xs text-slate-500">{editingPasswordDb.database_name}</p>
                 </div>
               </div>
@@ -538,6 +699,21 @@ export default function Databases() {
             >
               <input type="hidden" name="intent" value="update_db_password" />
               <input type="hidden" name="database_id" value={editingPasswordDb.id} />
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Cluster Host
+                </label>
+                <input
+                  type="text"
+                  name="db_host"
+                  value={editDbHost}
+                  onChange={(e) => setEditDbHost(e.target.value)}
+                  required
+                  placeholder={defaultHost}
+                  className="w-full px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+              </div>
 
               <div>
                 <div className="flex items-center justify-between mb-1">
@@ -571,7 +747,7 @@ export default function Databases() {
                   </button>
                 </div>
                 <p className="mt-1 text-[11px] text-slate-400">
-                  Remember to update this in your <code>wp-config.php</code> or <code>.env</code> file if used by WordPress or scripts.
+                  Update this in your <code>wp-config.php</code> or <code>.env</code> file if used by WordPress or scripts.
                 </p>
               </div>
 
@@ -584,7 +760,7 @@ export default function Databases() {
                   Cancel
                 </Button>
                 <Button type="submit" loading={isSubmitting}>
-                  Save New Password
+                  Save Credentials
                 </Button>
               </div>
             </Form>
@@ -617,11 +793,13 @@ export default function Databases() {
                 <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
                   <span className="text-[11px] font-bold text-slate-400 uppercase block">Host</span>
                   <div className="flex items-center justify-between mt-1">
-                    <span className="font-mono font-bold text-slate-900">localhost</span>
+                    <span className="font-mono font-bold text-slate-900 truncate mr-2" title={selectedDb.database_host || defaultHost}>
+                      {selectedDb.database_host || defaultHost}
+                    </span>
                     <button
                       type="button"
-                      onClick={() => copyToClipboard("localhost", "host")}
-                      className="text-xs text-cyan-600 hover:underline"
+                      onClick={() => copyToClipboard(selectedDb.database_host || defaultHost, "host")}
+                      className="text-xs text-cyan-600 hover:underline shrink-0"
                     >
                       {copiedField === "host" ? "Copied!" : "Copy"}
                     </button>
@@ -631,10 +809,12 @@ export default function Databases() {
                 <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
                   <span className="text-[11px] font-bold text-slate-400 uppercase block">Port</span>
                   <div className="flex items-center justify-between mt-1">
-                    <span className="font-mono font-bold text-slate-900">3306</span>
+                    <span className="font-mono font-bold text-slate-900">
+                      {selectedDb.database_port || 3306}
+                    </span>
                     <button
                       type="button"
-                      onClick={() => copyToClipboard("3306", "port")}
+                      onClick={() => copyToClipboard(String(selectedDb.database_port || 3306), "port")}
                       className="text-xs text-cyan-600 hover:underline"
                     >
                       {copiedField === "port" ? "Copied!" : "Copy"}
@@ -694,6 +874,7 @@ export default function Databases() {
                       type="button"
                       onClick={() => {
                         setEditingPasswordDb(selectedDb);
+                        setEditDbHost(selectedDb.database_host || defaultHost);
                         handleGeneratePassword("update");
                       }}
                       className="text-xs font-semibold text-amber-700 hover:underline"
@@ -715,7 +896,7 @@ export default function Databases() {
                   <button
                     type="button"
                     onClick={() => {
-                      const snippet = `define( 'DB_NAME', '${selectedDb.database_name}' );\ndefine( 'DB_USER', '${selectedDb.database_user}' );\ndefine( 'DB_PASSWORD', '${selectedDb.database_password || ""}' );\ndefine( 'DB_HOST', 'localhost' );\ndefine( 'DB_CHARSET', 'utf8mb4' );`;
+                      const snippet = `define( 'DB_NAME', '${selectedDb.database_name}' );\ndefine( 'DB_USER', '${selectedDb.database_user}' );\ndefine( 'DB_PASSWORD', '${selectedDb.database_password || ""}' );\ndefine( 'DB_HOST', '${selectedDb.database_host || defaultHost}' );\ndefine( 'DB_CHARSET', 'utf8mb4' );`;
                       copyToClipboard(snippet, "snippet");
                     }}
                     className="text-xs font-semibold text-cyan-600 hover:underline"
@@ -727,26 +908,24 @@ export default function Databases() {
 {`define( 'DB_NAME', '${selectedDb.database_name}' );
 define( 'DB_USER', '${selectedDb.database_user}' );
 define( 'DB_PASSWORD', '${selectedDb.database_password || ""}' );
-define( 'DB_HOST', 'localhost' );
+define( 'DB_HOST', '${selectedDb.database_host || defaultHost}' );
 define( 'DB_CHARSET', 'utf8mb4' );`}
                 </pre>
               </div>
 
-              <div className="pt-2 flex justify-between items-center border-t border-slate-100">
-                <a
-                  href={`https://panel.ddlg.in/sites/pma/?server=localhost&username=${encodeURIComponent(
-                    selectedDb.database_user
-                  )}&db=${encodeURIComponent(selectedDb.database_name)}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-cyan-700 bg-cyan-50 px-3 py-2 rounded-xl hover:bg-cyan-100 transition"
+              <div className="pt-2 flex flex-col sm:flex-row justify-between items-stretch sm:items-center gap-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => handleCopyAndLaunchPma(selectedDb)}
+                  className="inline-flex items-center justify-center gap-2 text-xs font-bold text-white bg-cyan-600 px-4 py-2.5 rounded-xl hover:bg-cyan-700 shadow-sm transition"
                 >
-                  <span>🗄️ Manage in Web phpMyAdmin</span>
+                  <span>⚡ Copy Password & Open in phpMyAdmin</span>
                   <span>↗</span>
-                </a>
+                </button>
 
                 <Button
                   type="button"
+                  variant="outlined"
                   onClick={() => setSelectedDb(null)}
                 >
                   Close
