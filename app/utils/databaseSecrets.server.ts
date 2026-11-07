@@ -1,14 +1,11 @@
-import { connect } from "@tidbcloud/serverless";
+import mysql from "mysql2/promise";
 import { getSupabaseAdminClient } from "./supabase.server";
 
 export const DEFAULT_CLUSTER_HOST = "gateway01.ap-southeast-1.prod.aws.tidbcloud.com";
 export const DEFAULT_CLUSTER_PORT = 4000;
-
-export const TIDB_ROOT_USER = process.env.TIDB_ROOT_USER || "27pffWay1357PEU.root";
-export const TIDB_ROOT_PASSWORD = process.env.TIDB_ROOT_PASSWORD || "DfT1c4AMwJe0Vplb";
-export const TIDB_DATABASE_URL =
-  process.env.TIDB_DATABASE_URL ||
-  `mysql://${TIDB_ROOT_USER}:${TIDB_ROOT_PASSWORD}@${DEFAULT_CLUSTER_HOST}/sys`;
+export const TIDB_CLUSTER_PREFIX = "27pffwAy1357PEU";
+export const TIDB_ROOT_USER = process.env.TIDB_ROOT_USER || "27pffwAy1357PEU.root";
+export const TIDB_ROOT_PASSWORD = process.env.TIDB_ROOT_PASSWORD || "9ZUa1ZFPVPv56ck5";
 
 export interface DatabaseSecretMeta {
   database_id: string;
@@ -25,6 +22,14 @@ export function generateSecurePassword(): string {
     pass += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return pass;
+}
+
+export function formatTiDBUser(rawUser: string): string {
+  const clean = rawUser.replace(/[^a-zA-Z0-9_\-]/g, "");
+  if (clean.startsWith(`${TIDB_CLUSTER_PREFIX}.`)) {
+    return clean;
+  }
+  return `${TIDB_CLUSTER_PREFIX}.${clean}`;
 }
 
 export async function getDatabaseSecret(databaseId: string): Promise<string> {
@@ -122,34 +127,46 @@ export async function provisionTiDBDatabase(params: {
   database_password: string;
 }): Promise<{
   success: boolean;
+  formatted_user: string;
   host: string;
   port: number;
   error?: string;
 }> {
   const cleanDb = params.database_name.replace(/[^a-zA-Z0-9_\-]/g, "");
-  const cleanUser = params.database_user.replace(/[^a-zA-Z0-9_\-]/g, "");
+  const fullUser = formatTiDBUser(params.database_user);
   const pass = params.database_password;
 
   try {
-    const conn = connect({ url: TIDB_DATABASE_URL });
+    const conn = await mysql.createConnection({
+      host: DEFAULT_CLUSTER_HOST,
+      port: DEFAULT_CLUSTER_PORT,
+      user: TIDB_ROOT_USER,
+      password: TIDB_ROOT_PASSWORD,
+      ssl: { minVersion: "TLSv1.2", rejectUnauthorized: true },
+    });
 
     // 1. Create database
-    await conn.execute(`CREATE DATABASE IF NOT EXISTS \`${cleanDb}\`;`);
+    await conn.query(`CREATE DATABASE IF NOT EXISTS \`${cleanDb}\`;`);
 
     // 2. Create isolated client user
-    await conn.execute(`CREATE USER IF NOT EXISTS '${cleanUser}'@'%' IDENTIFIED BY '${pass}';`);
+    await conn.query(`CREATE USER IF NOT EXISTS '${fullUser}'@'%' IDENTIFIED BY '${pass}';`);
 
     // 3. Grant full privileges on the created database
-    await conn.execute(`GRANT ALL PRIVILEGES ON \`${cleanDb}\`.* TO '${cleanUser}'@'%';`);
+    await conn.query(`GRANT ALL PRIVILEGES ON \`${cleanDb}\`.* TO '${fullUser}'@'%';`);
+    await conn.query("FLUSH PRIVILEGES;");
+
+    await conn.end();
 
     return {
       success: true,
+      formatted_user: fullUser,
       host: DEFAULT_CLUSTER_HOST,
       port: DEFAULT_CLUSTER_PORT,
     };
   } catch (err: any) {
     return {
       success: false,
+      formatted_user: fullUser,
       host: DEFAULT_CLUSTER_HOST,
       port: DEFAULT_CLUSTER_PORT,
       error: err.message || "Failed to provision database on TiDB Cloud.",
@@ -165,19 +182,29 @@ export async function dropTiDBDatabase(params: {
   database_user?: string;
 }): Promise<{ success: boolean; error?: string }> {
   const cleanDb = params.database_name.replace(/[^a-zA-Z0-9_\-]/g, "");
-  const cleanUser = params.database_user ? params.database_user.replace(/[^a-zA-Z0-9_\-]/g, "") : null;
+  const fullUser = params.database_user ? formatTiDBUser(params.database_user) : null;
 
   try {
-    const conn = connect({ url: TIDB_DATABASE_URL });
-    await conn.execute(`DROP DATABASE IF EXISTS \`${cleanDb}\`;`);
+    const conn = await mysql.createConnection({
+      host: DEFAULT_CLUSTER_HOST,
+      port: DEFAULT_CLUSTER_PORT,
+      user: TIDB_ROOT_USER,
+      password: TIDB_ROOT_PASSWORD,
+      ssl: { minVersion: "TLSv1.2", rejectUnauthorized: true },
+    });
 
-    if (cleanUser) {
+    await conn.query(`DROP DATABASE IF EXISTS \`${cleanDb}\`;`);
+
+    if (fullUser) {
       try {
-        await conn.execute(`DROP USER IF EXISTS '${cleanUser}'@'%';`);
+        await conn.query(`DROP USER IF EXISTS '${fullUser}'@'%';`);
       } catch {
         // user might not exist or already dropped
       }
     }
+
+    await conn.query("FLUSH PRIVILEGES;");
+    await conn.end();
 
     return { success: true };
   } catch (err: any) {
@@ -195,10 +222,20 @@ export async function updateTiDBUserPassword(
   username: string,
   newPassword: string
 ): Promise<{ success: boolean; error?: string }> {
-  const cleanUser = username.replace(/[^a-zA-Z0-9_\-]/g, "");
+  const fullUser = formatTiDBUser(username);
   try {
-    const conn = connect({ url: TIDB_DATABASE_URL });
-    await conn.execute(`ALTER USER '${cleanUser}'@'%' IDENTIFIED BY '${newPassword}';`);
+    const conn = await mysql.createConnection({
+      host: DEFAULT_CLUSTER_HOST,
+      port: DEFAULT_CLUSTER_PORT,
+      user: TIDB_ROOT_USER,
+      password: TIDB_ROOT_PASSWORD,
+      ssl: { minVersion: "TLSv1.2", rejectUnauthorized: true },
+    });
+
+    await conn.query(`ALTER USER '${fullUser}'@'%' IDENTIFIED BY '${newPassword}';`);
+    await conn.query("FLUSH PRIVILEGES;");
+    await conn.end();
+
     return { success: true };
   } catch (err: any) {
     return {
@@ -209,7 +246,7 @@ export async function updateTiDBUserPassword(
 }
 
 /**
- * Tests live MySQL connection either via TiDB Cloud Serverless or ServerByte fallback
+ * Tests live MySQL connection either via TiDB Cloud or ServerByte fallback
  */
 export async function testMySQLConnection(params: {
   host?: string;
@@ -228,21 +265,31 @@ export async function testMySQLConnection(params: {
   const isTiDB = host.includes("tidbcloud.com");
 
   if (isTiDB) {
+    const fullUser = formatTiDBUser(params.user);
     try {
-      const url = `mysql://${params.user}:${params.pass}@${host}/${params.db || "sys"}`;
-      const conn = connect({ url });
-      const versionResult: any = await conn.execute("SELECT VERSION() as v;");
-      const version = Array.isArray(versionResult) && versionResult[0]?.v ? versionResult[0].v : "TiDB Cloud Serverless";
+      const conn = await mysql.createConnection({
+        host,
+        port: params.port || DEFAULT_CLUSTER_PORT,
+        user: fullUser,
+        password: params.pass,
+        database: params.db || "sys",
+        ssl: { minVersion: "TLSv1.2", rejectUnauthorized: true },
+      });
+
+      const [rows]: any = await conn.query("SELECT VERSION() as v;");
+      const version = Array.isArray(rows) && rows[0]?.v ? rows[0].v : "8.0.11-TiDB-Serverless";
 
       let tablesCount = 0;
       if (params.db) {
         try {
-          const tablesResult: any = await conn.execute(`SHOW TABLES FROM \`${params.db}\`;`);
-          tablesCount = Array.isArray(tablesResult) ? tablesResult.length : 0;
+          const [tables]: any = await conn.query(`SHOW TABLES FROM \`${params.db}\`;`);
+          tablesCount = Array.isArray(tables) ? tables.length : 0;
         } catch {
           // ignore table count error
         }
       }
+
+      await conn.end();
 
       return {
         success: true,

@@ -123,6 +123,8 @@ export async function action({ request }: ActionFunctionArgs) {
     const cleanDbName = rawDbName.replace(/[^a-zA-Z0-9_\-]/g, "");
     const cleanUser = rawDbUser.replace(/[^a-zA-Z0-9_\-]/g, "");
 
+    let userToSave = cleanUser;
+
     // Automatically provision database and user on TiDB Cloud
     if (dbHost.includes("tidbcloud.com")) {
       const provRes = await provisionTiDBDatabase({
@@ -139,6 +141,7 @@ export async function action({ request }: ActionFunctionArgs) {
           { status: 500 }
         );
       }
+      userToSave = provRes.formatted_user;
     }
 
     const { data: newDb, error } = await supabaseAdmin
@@ -148,7 +151,7 @@ export async function action({ request }: ActionFunctionArgs) {
         project_id: projectId ? String(projectId) : null,
         server_node_id: serverNodeId ? String(serverNodeId) : null,
         database_name: cleanDbName,
-        database_user: cleanUser,
+        database_user: userToSave,
         status: "active",
       })
       .select()
