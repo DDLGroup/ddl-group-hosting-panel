@@ -59,37 +59,46 @@ export async function deployZipToCloudStorage(subdomain: string, zipBuffer: Buff
   const uploadedFiles: string[] = [];
   const cleanZipForNode = new AdmZip();
 
-  for (let i = 0; i < fileEntries.length; i++) {
-    const entry = fileEntries[i];
-    let cleanPath = normalizedPaths[i];
-    if (hasCommonRoot) {
-      cleanPath = cleanPath.split("/").slice(1).join("/");
-    }
+  // Upload in parallel batches of 10 for maximum throughput without exceeding Netlify 10s timeout
+  const BATCH_SIZE = 10;
+  for (let i = 0; i < fileEntries.length; i += BATCH_SIZE) {
+    const batch = fileEntries.slice(i, i + BATCH_SIZE);
+    await Promise.all(
+      batch.map(async (entry, batchIdx) => {
+        const idx = i + batchIdx;
+        let cleanPath = normalizedPaths[idx];
+        if (hasCommonRoot) {
+          cleanPath = cleanPath.split("/").slice(1).join("/");
+        }
 
-    if (!cleanPath) continue;
+        if (!cleanPath) return;
 
-    const fileBuffer = entry.getData();
-    cleanZipForNode.addFile(cleanPath, fileBuffer);
+        const fileBuffer = entry.getData();
+        cleanZipForNode.addFile(cleanPath, fileBuffer);
 
-    const contentType = getMimeType(cleanPath);
-    const storagePath = `${subdomain}/${cleanPath}`;
+        const contentType = getMimeType(cleanPath);
+        const storagePath = `${subdomain}/${cleanPath}`;
 
-    const { error } = await supabaseAdmin.storage
-      .from("client-websites")
-      .upload(storagePath, fileBuffer, {
-        upsert: true,
-        contentType,
-      });
+        const { error } = await supabaseAdmin.storage
+          .from("client-websites")
+          .upload(storagePath, fileBuffer, {
+            upsert: true,
+            contentType,
+          });
 
-    if (error) {
-      console.error(`Failed to upload ${cleanPath}:`, error.message);
-    } else {
-      uploadedFiles.push(cleanPath);
-    }
+        if (error) {
+          console.error(`Failed to upload ${cleanPath}:`, error.message);
+        } else {
+          uploadedFiles.push(cleanPath);
+        }
+      })
+    );
   }
 
-  // Also auto-sync clean normalized zip to assigned server node (e.g. ServerByte)
-  await syncZipBufferToExecutionNode(subdomain, cleanZipForNode.toBuffer());
+  // Auto-sync clean normalized zip to assigned server node in background (fire-and-forget so response is instant)
+  syncZipBufferToExecutionNode(subdomain, cleanZipForNode.toBuffer()).catch((err) => {
+    console.warn(`[Node Sync Background] Notice for ${subdomain}:`, err.message);
+  });
 
   return {
     success: true,

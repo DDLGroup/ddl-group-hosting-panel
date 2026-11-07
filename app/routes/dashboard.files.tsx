@@ -306,7 +306,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
-  // 1b. Sync individual files uploaded directly via signed URL (bypasses 6MB limit)
+  // 1b. Sync individual files / folder uploaded directly via signed URL (bypasses 6MB limit)
   if (intent === "sync_uploaded_files") {
     const filesJson = String(formData.get("uploaded_files_json") || "[]");
     let fileList: Array<{ path: string }> = [];
@@ -317,30 +317,23 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     if (fileList.length === 0) {
-      return Response.json({ error: "No files to sync." }, { status: 400 });
+      return Response.json({ error: "No files were uploaded." }, { status: 400 });
     }
 
-    const filesToSync: Array<{ path: string; buffer: Buffer }> = [];
-    for (const item of fileList) {
-      const storageKey = `${project.subdomain}/${item.path}`;
-      const { data: fileBlob } = await supabaseAdmin.storage
-        .from("client-websites")
-        .download(storageKey);
-
-      if (fileBlob) {
-        filesToSync.push({
-          path: item.path,
-          buffer: Buffer.from(await fileBlob.arrayBuffer()),
-        });
-      }
-    }
-
-    if (filesToSync.length > 0) {
-      await syncFilesToExecutionNode(project.subdomain, filesToSync);
-    }
+    // Record deployment in database (files already in Supabase Storage directly from browser)
+    await supabaseAdmin.from("deployments").insert({
+      project_id: project.id,
+      version_number: 1,
+      runtime: project.runtime || "static",
+      source_type: "folder_upload",
+      status: "deployed",
+      commit_message: `Uploaded ${fileList.length} files into /${currentPath || "root"}`,
+      deployed_by: profile.id,
+      logs: `Uploaded ${fileList.length} files directly to cloud storage for ${project.subdomain}.`,
+    });
 
     return Response.json({
-      success: `Successfully uploaded and synced ${filesToSync.length} file(s) into /${currentPath || "root"}.`,
+      success: `Successfully uploaded and deployed ${fileList.length} file(s) into /${currentPath || "root"}!`,
     });
   }
 
