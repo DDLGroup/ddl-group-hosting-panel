@@ -61,12 +61,24 @@ export async function loader({ request }: LoaderFunctionArgs) {
     })
   );
 
+  let userPlan: any = null;
+  if (profile.role === "customer") {
+    const { data: acc } = await supabaseAdmin
+      .from("hosting_accounts")
+      .select("*, hosting_plans(*)")
+      .eq("customer_id", profile.id)
+      .maybeSingle();
+    userPlan = acc?.hosting_plans || null;
+  }
+
   return Response.json({
     databases: databasesWithDetails,
     projects: projectsRes.data || [],
     serverNodes: nodesRes.data || [],
     defaultHost: DEFAULT_CLUSTER_HOST,
     defaultPort: DEFAULT_CLUSTER_PORT,
+    profile,
+    userPlan,
   });
 }
 
@@ -104,6 +116,30 @@ export async function action({ request }: ActionFunctionArgs) {
 
   // Create Database Action
   if (intent === "create_db") {
+    // Quota enforcement for customers
+    if (profile.role === "customer") {
+      const { data: acc } = await supabaseAdmin
+        .from("hosting_accounts")
+        .select("*, hosting_plans(*)")
+        .eq("customer_id", profile.id)
+        .maybeSingle();
+
+      const { count: currentCount } = await supabaseAdmin
+        .from("databases")
+        .select("id", { count: "exact", head: true })
+        .eq("customer_id", profile.id);
+
+      const maxDbs = acc?.hosting_plans?.max_databases ?? 1;
+      if ((currentCount || 0) >= maxDbs) {
+        return Response.json(
+          {
+            error: `Your plan (${acc?.hosting_plans?.name || "Starter Cloud"}) allows up to ${maxDbs} database(s). You have already created ${currentCount} database(s). Please upgrade your plan in Billing & Plans to provision more.`,
+          },
+          { status: 403 }
+        );
+      }
+    }
+
     const rawDbName = String(formData.get("db_name") || "").trim();
     const rawDbUser = String(formData.get("db_user") || "").trim();
     const dbHost = String(formData.get("db_host") || DEFAULT_CLUSTER_HOST).trim();
@@ -171,7 +207,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     return Response.json({
-      success: `🎉 MySQL database "${cleanDbName}" automatically provisioned and active on TiDB Cloud (Port ${dbPort})!`,
+      success: `🎉 MySQL database "${cleanDbName}" automatically provisioned and ready to use!`,
     });
   }
 
@@ -289,7 +325,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function Databases() {
-  const { databases, projects, serverNodes, defaultHost, defaultPort } = useLoaderData<typeof loader>();
+  const { databases, projects, serverNodes, defaultHost, defaultPort, profile, userPlan } = useLoaderData<typeof loader>();
   const actionData = useActionData<{
     error?: string;
     success?: string;
@@ -386,12 +422,20 @@ export default function Databases() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
             <span>MySQL Databases</span>
-            <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-cyan-100 text-cyan-800 border border-cyan-200">
-              TiDB Cloud Powered
-            </span>
+            {profile?.role !== "customer" ? (
+              <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-cyan-100 text-cyan-800 border border-cyan-200">
+                TiDB Cloud Powered
+              </span>
+            ) : (
+              <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
+                Cloud MySQL
+              </span>
+            )}
           </h1>
           <p className="text-sm text-slate-500">
-            Automated 1-click cloud MySQL databases with instant provisioning, credentials management, and phpMyAdmin access
+            {profile?.role === "customer"
+              ? "Manage your MySQL databases, credentials, and access phpMyAdmin in 1-click"
+              : "Automated 1-click cloud MySQL databases with instant provisioning, credentials management, and phpMyAdmin access"}
           </p>
         </div>
 
@@ -420,40 +464,60 @@ export default function Databases() {
         </div>
       </div>
 
-      {/* Cluster Guidance Card */}
-      <div className="p-4 bg-gradient-to-r from-slate-900 via-slate-800 to-cyan-950 text-white rounded-2xl shadow-sm border border-slate-700 flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span className="text-xs uppercase tracking-wider font-bold text-cyan-400">
-              TiDB Cloud Engine (MySQL 8.0 Wire-Compatible)
+      {/* Customer Quota Pill */}
+      {profile?.role === "customer" && userPlan && (
+        <div className="flex flex-wrap items-center justify-between gap-3 p-4 bg-white border border-slate-200 rounded-2xl shadow-xs">
+          <div className="flex items-center gap-2 text-sm text-slate-700">
+            <span className="font-bold text-slate-900">Assigned Plan:</span>
+            <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-cyan-50 text-cyan-800 border border-cyan-200">
+              {userPlan.name}
             </span>
           </div>
-          <p className="text-sm text-slate-200">
-            Databases and users are provisioned 100% automatically in 1 click on TiDB Cloud Serverless.
-          </p>
-          <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3 pt-1">
-            <span>
-              Primary Cluster Host: <code className="text-cyan-300 font-mono font-bold">{defaultHost}</code>
+          <div className="text-xs text-slate-500 flex items-center gap-2">
+            <span>Database Quota:</span>
+            <span className="font-mono font-bold text-slate-800">
+              {databases.length} / {userPlan.max_databases >= 999 ? "Unlimited" : userPlan.max_databases} Databases Used
             </span>
-            <span>•</span>
-            <span>Port: <code className="text-cyan-300 font-mono font-bold">4000 / 3306</code></span>
-            <span>•</span>
-            <span>Web File Storage: <span className="text-slate-300 font-medium">ServerByte</span></span>
           </div>
         </div>
-        <div className="shrink-0 flex items-center gap-2">
-          <a
-            href="https://panel.ddlg.in/sites/pma/"
-            target="_blank"
-            rel="noreferrer"
-            className="px-3.5 py-2 text-xs font-bold text-slate-900 bg-cyan-400 hover:bg-cyan-300 rounded-xl transition shadow-xs flex items-center gap-1.5"
-          >
-            <span>Launch phpMyAdmin</span>
-            <span>↗</span>
-          </a>
+      )}
+
+      {/* Cluster Guidance Card - ADMIN ONLY */}
+      {profile?.role !== "customer" && (
+        <div className="p-4 bg-gradient-to-r from-slate-900 via-slate-800 to-cyan-950 text-white rounded-2xl shadow-sm border border-slate-700 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              <span className="text-xs uppercase tracking-wider font-bold text-cyan-400">
+                TiDB Cloud Engine (MySQL 8.0 Wire-Compatible)
+              </span>
+            </div>
+            <p className="text-sm text-slate-200">
+              Databases and users are provisioned 100% automatically in 1 click on TiDB Cloud Serverless.
+            </p>
+            <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3 pt-1">
+              <span>
+                Primary Cluster Host: <code className="text-cyan-300 font-mono font-bold">{defaultHost}</code>
+              </span>
+              <span>•</span>
+              <span>Port: <code className="text-cyan-300 font-mono font-bold">4000 / 3306</code></span>
+              <span>•</span>
+              <span>Web File Storage: <span className="text-slate-300 font-medium">ServerByte</span></span>
+            </div>
+          </div>
+          <div className="shrink-0 flex items-center gap-2">
+            <a
+              href="https://panel.ddlg.in/sites/pma/"
+              target="_blank"
+              rel="noreferrer"
+              className="px-3.5 py-2 text-xs font-bold text-slate-900 bg-cyan-400 hover:bg-cyan-300 rounded-xl transition shadow-xs flex items-center gap-1.5"
+            >
+              <span>Launch phpMyAdmin</span>
+              <span>↗</span>
+            </a>
+          </div>
         </div>
-      </div>
+      )}
 
       {actionData?.error && (
         <div className="p-4 text-sm font-medium text-rose-700 bg-rose-50 border border-rose-200 rounded-xl flex items-center justify-between">
@@ -486,7 +550,7 @@ export default function Databases() {
               <tr>
                 <th className="py-3.5 px-4">Database Name</th>
                 <th className="py-3.5 px-4">Username</th>
-                <th className="py-3.5 px-4">Cluster Host : Port</th>
+                <th className="py-3.5 px-4">{profile?.role === "customer" ? "Host : Port" : "Cluster Host : Port"}</th>
                 <th className="py-3.5 px-4">Mapped Website</th>
                 <th className="py-3.5 px-4">Database Engine</th>
                 <th className="py-3.5 px-4">Status</th>
@@ -530,7 +594,7 @@ export default function Databases() {
                     <td className="py-3.5 px-4 text-xs">
                       <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-cyan-50 border border-cyan-200 text-cyan-800 font-semibold">
                         <span className="w-1.5 h-1.5 rounded-full bg-cyan-500"></span>
-                        TiDB Cloud Serverless
+                        {profile?.role === "customer" ? "MySQL 8.0" : "TiDB Cloud Serverless"}
                       </span>
                     </td>
                     <td className="py-3.5 px-4">
@@ -635,28 +699,32 @@ export default function Databases() {
             >
               <input type="hidden" name="intent" value="create_db" />
 
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-sm font-medium text-slate-700">
-                    MySQL Host / Cluster Host
-                  </label>
-                  <span className="text-[11px] font-semibold text-cyan-700 bg-cyan-50 px-2 py-0.5 rounded border border-cyan-200">
-                    TiDB Cloud Serverless
-                  </span>
+              {profile?.role !== "customer" ? (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-sm font-medium text-slate-700">
+                      MySQL Host / Cluster Host
+                    </label>
+                    <span className="text-[11px] font-semibold text-cyan-700 bg-cyan-50 px-2 py-0.5 rounded border border-cyan-200">
+                      TiDB Cloud Serverless
+                    </span>
+                  </div>
+                  <input
+                    type="text"
+                    name="db_host"
+                    value={createDbHost}
+                    onChange={(e) => setCreateDbHost(e.target.value)}
+                    required
+                    placeholder={defaultHost}
+                    className="w-full px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500 bg-slate-50"
+                  />
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    Automated provisioning on TiDB Cloud Serverless (MySQL 8.0 wire-compatible) on port 4000.
+                  </p>
                 </div>
-                <input
-                  type="text"
-                  name="db_host"
-                  value={createDbHost}
-                  onChange={(e) => setCreateDbHost(e.target.value)}
-                  required
-                  placeholder={defaultHost}
-                  className="w-full px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500 bg-slate-50"
-                />
-                <p className="mt-1 text-[11px] text-slate-400">
-                  Automated provisioning on TiDB Cloud Serverless (MySQL 8.0 wire-compatible) on port 4000.
-                </p>
-              </div>
+              ) : (
+                <input type="hidden" name="db_host" value={createDbHost} />
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
@@ -746,13 +814,15 @@ export default function Databases() {
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-slate-700">Database Engine Architecture</span>
                   <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-cyan-100 text-cyan-800 border border-cyan-200">
-                    TiDB Cloud Serverless
+                    {profile?.role === "customer" ? "High-Speed MySQL 8.0" : "TiDB Cloud Serverless"}
                   </span>
                 </div>
                 <div className="text-[11px] text-slate-500 flex flex-col gap-1">
                   <div className="flex items-center gap-1.5">
                     <span className="text-emerald-500">🔒</span>
-                    <span className="font-medium text-slate-700">AWS Singapore Cluster with Encrypted TLS / SSL</span>
+                    <span className="font-medium text-slate-700">
+                      {profile?.role === "customer" ? "Encrypted Cloud Database Storage" : "AWS Singapore Cluster with Encrypted TLS / SSL"}
+                    </span>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="text-cyan-600">⚡</span>
@@ -761,20 +831,22 @@ export default function Databases() {
                 </div>
               </div>
 
-              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between">
-                <div>
-                  <div className="text-xs font-bold text-slate-700">Verify TiDB Cloud Connection</div>
-                  <div className="text-[11px] text-slate-400">Tests live TLS/SSL handshake to TiDB cluster</div>
+              {profile?.role !== "customer" && (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-bold text-slate-700">Verify TiDB Cloud Connection</div>
+                    <div className="text-[11px] text-slate-400">Tests live TLS/SSL handshake to TiDB cluster</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleTestConnection}
+                    disabled={isSubmitting}
+                    className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-100 shadow-xs transition"
+                  >
+                    {isSubmitting ? "Testing..." : "Test Connection"}
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleTestConnection}
-                  disabled={isSubmitting}
-                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-100 shadow-xs transition"
-                >
-                  {isSubmitting ? "Testing..." : "Test Connection"}
-                </button>
-              </div>
+              )}
 
               <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
                 <Button

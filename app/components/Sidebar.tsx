@@ -22,6 +22,7 @@ const MAIN_NAV_ITEMS: NavItem[] = [
 
 const ADMIN_NAV_ITEMS: NavItem[] = [
   { label: "User Management", href: "/dashboard/users", roles: ["super_admin", "staff_admin"] },
+  { label: "Hosting Plans", href: "/dashboard/billing", roles: ["super_admin", "staff_admin"] },
   { label: "Server Nodes", href: "/dashboard/server-nodes", roles: ["super_admin", "technical_staff"] },
   { label: "Audit Logs", href: "/dashboard/audit-logs", roles: ["super_admin"] },
 ];

@@ -36,10 +36,21 @@ export async function loader({ request }: LoaderFunctionArgs) {
     supabaseAdmin.from("server_nodes").select("id, name, ip_address, status"),
   ]);
 
+  let userPlan: any = null;
+  if (profile.role === "customer") {
+    const { data: acc } = await supabaseAdmin
+      .from("hosting_accounts")
+      .select("*, hosting_plans(*)")
+      .eq("customer_id", profile.id)
+      .maybeSingle();
+    userPlan = acc?.hosting_plans || null;
+  }
+
   return Response.json({
     websites: websitesRes.data || [],
     serverNodes: serverNodesRes.data || [],
     profile,
+    userPlan,
   });
 }
 
@@ -75,6 +86,30 @@ export async function action({ request }: ActionFunctionArgs) {
 
     if (existing) {
       return Response.json({ error: "That subdomain is already taken. Please choose another." }, { status: 400 });
+    }
+
+    // Quota enforcement for customers based on assigned plan
+    if (profile.role === "customer") {
+      const { data: acc } = await supabaseAdmin
+        .from("hosting_accounts")
+        .select("*, hosting_plans(*)")
+        .eq("customer_id", profile.id)
+        .maybeSingle();
+
+      const { count: currentSites } = await supabaseAdmin
+        .from("hosting_projects")
+        .select("id", { count: "exact", head: true })
+        .eq("customer_id", profile.id);
+
+      const maxSites = acc?.hosting_plans?.max_websites ?? 1;
+      if ((currentSites || 0) >= maxSites) {
+        return Response.json(
+          {
+            error: `Your plan (${acc?.hosting_plans?.name || "Starter Cloud"}) allows hosting up to ${maxSites} website(s). You have already reached your limit (${currentSites} active). Please upgrade your plan in Billing & Plans to host more websites.`,
+          },
+          { status: 403 }
+        );
+      }
     }
 
     // Ensure user has a hosting account record, or create a default one
@@ -331,7 +366,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function Websites() {
-  const { websites, serverNodes } = useLoaderData<typeof loader>();
+  const { websites, serverNodes, profile, userPlan } = useLoaderData<typeof loader>();
   const actionData = useActionData<{ error?: string; success?: string }>();
   const navigation = useNavigation();
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -363,6 +398,27 @@ export default function Websites() {
           + Deploy New Website
         </button>
       </div>
+
+      {/* Customer Plan Quota Pill */}
+      {profile?.role === "customer" && userPlan && (
+        <div className="flex flex-wrap items-center justify-between gap-3 p-4 bg-white border border-slate-200 rounded-2xl shadow-xs">
+          <div className="flex items-center gap-2 text-sm text-slate-700">
+            <span className="font-bold text-slate-900">Current Plan:</span>
+            <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-cyan-50 text-cyan-800 border border-cyan-200">
+              {userPlan.name}
+            </span>
+            <span className="text-xs text-slate-400 font-mono">
+              (₹{userPlan.price_cents / 100}/mo • {userPlan.max_storage_mb >= 1024 ? `${userPlan.max_storage_mb / 1024}GB` : `${userPlan.max_storage_mb}MB`} Pure NVMe SSD)
+            </span>
+          </div>
+          <div className="text-xs text-slate-500 flex items-center gap-2">
+            <span>Website Quota:</span>
+            <span className="font-mono font-bold text-slate-800">
+              {websites.length} / {userPlan.max_websites >= 999 ? "Unlimited" : userPlan.max_websites} Active
+            </span>
+          </div>
+        </div>
+      )}
 
       {actionData?.error && (
         <div className="p-4 text-sm font-medium text-rose-700 bg-rose-50 border border-rose-200 rounded-xl">

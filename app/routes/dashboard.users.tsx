@@ -51,9 +51,30 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
   }
 
-  const enrichedUsers: UserProfile[] = (profiles || []).map((p) => ({
+  // Fetch all hosting plans
+  const { data: plans } = await supabaseAdmin
+    .from("hosting_plans")
+    .select("*")
+    .order("price_cents", { ascending: true });
+
+  // Fetch customer hosting accounts to see who is on what plan
+  const { data: accounts } = await supabaseAdmin
+    .from("hosting_accounts")
+    .select("customer_id, plan_id, hosting_plans(id, name, slug, price_cents, max_websites, max_storage_mb, max_databases)");
+
+  const userPlanMap = new Map<string, any>();
+  if (accounts) {
+    for (const acc of accounts) {
+      if (acc.customer_id) {
+        userPlanMap.set(acc.customer_id, acc.hosting_plans);
+      }
+    }
+  }
+
+  const enrichedUsers = (profiles || []).map((p) => ({
     ...p,
     email: emailMap.get(p.id) || p.email || "No email",
+    plan: userPlanMap.get(p.id) || null,
   }));
 
   const filteredUsers = search
@@ -64,7 +85,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       )
     : enrichedUsers;
 
-  return Response.json({ users: filteredUsers });
+  return Response.json({ users: filteredUsers, plans: plans || [] });
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -79,6 +100,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const email = formData.get("email");
     const password = formData.get("password");
     const role = formData.get("role") as UserRole;
+    const planId = formData.get("plan_id") as string;
 
     if (
       typeof fullName !== "string" ||
@@ -121,15 +143,73 @@ export async function action({ request }: ActionFunctionArgs) {
       console.error("Failed to insert user profile:", profileError.message);
     }
 
+    // If customer, assign the selected hosting plan
+    if (role === "customer" && planId) {
+      await supabaseAdmin.from("hosting_accounts").insert({
+        customer_id: newUser.user.id,
+        plan_id: planId,
+        status: "active",
+      });
+    }
+
     await logAuditEvent(
       actorProfile.id,
       "CREATE_USER",
       "user_profiles",
       newUser.user.id,
-      { email: email.trim(), role, full_name: fullName.trim() }
+      { email: email.trim(), role, full_name: fullName.trim(), plan_id: planId }
     );
 
-    return Response.json({ success: "Account successfully created!" });
+    return Response.json({ success: "Account successfully created and plan assigned!" });
+  }
+
+  // 2. Assign / Change Customer Plan
+  if (intent === "assign_plan") {
+    const targetUserId = formData.get("user_id") as string;
+    const newPlanId = formData.get("plan_id") as string;
+
+    if (!targetUserId || !newPlanId) {
+      return Response.json({ error: "User ID and Plan ID are required." }, { status: 400 });
+    }
+
+    const { data: existingAccount } = await supabaseAdmin
+      .from("hosting_accounts")
+      .select("id")
+      .eq("customer_id", targetUserId)
+      .maybeSingle();
+
+    if (existingAccount) {
+      const { error: updateError } = await supabaseAdmin
+        .from("hosting_accounts")
+        .update({ plan_id: newPlanId, updated_at: new Date().toISOString() })
+        .eq("id", existingAccount.id);
+
+      if (updateError) {
+        return Response.json({ error: updateError.message }, { status: 500 });
+      }
+    } else {
+      const { error: insertError } = await supabaseAdmin
+        .from("hosting_accounts")
+        .insert({
+          customer_id: targetUserId,
+          plan_id: newPlanId,
+          status: "active",
+        });
+
+      if (insertError) {
+        return Response.json({ error: insertError.message }, { status: 500 });
+      }
+    }
+
+    await logAuditEvent(
+      actorProfile.id,
+      "ASSIGN_HOSTING_PLAN",
+      "hosting_accounts",
+      targetUserId,
+      { new_plan_id: newPlanId }
+    );
+
+    return Response.json({ success: "Customer hosting plan updated successfully!" });
   }
 
   // 2. Toggle Status (Active / Suspended)
@@ -182,12 +262,14 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function UserManagement() {
-  const { users } = useLoaderData<typeof loader>();
+  const { users, plans } = useLoaderData<typeof loader>();
   const actionData = useActionData<{ error?: string; success?: string }>();
   const navigation = useNavigation();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [assignPlanUser, setAssignPlanUser] = useState<any>(null);
+  const [createRole, setCreateRole] = useState("customer");
   const isSubmitting = navigation.state === "submitting";
 
   const roleColors: Record<string, string> = {
@@ -290,6 +372,7 @@ export default function UserManagement() {
               <tr>
                 <th className="py-3.5 px-4">User</th>
                 <th className="py-3.5 px-4">Role</th>
+                <th className="py-3.5 px-4">Hosting Plan</th>
                 <th className="py-3.5 px-4">Status</th>
                 <th className="py-3.5 px-4">Created Date</th>
                 <th className="py-3.5 px-4 text-right">Actions</th>
@@ -298,12 +381,12 @@ export default function UserManagement() {
             <tbody className="divide-y divide-slate-100">
               {users.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="py-8 text-center text-slate-400">
+                  <td colSpan={6} className="py-8 text-center text-slate-400">
                     No users found matching your filters.
                   </td>
                 </tr>
               ) : (
-                users.map((u: UserProfile) => (
+                users.map((u: any) => (
                   <tr key={u.id} className="hover:bg-slate-50/80 transition-colors">
                     <td className="py-3.5 px-4">
                       <div className="font-semibold text-slate-900">{u.full_name}</div>
@@ -313,6 +396,25 @@ export default function UserManagement() {
                       <span className={`inline-block px-2.5 py-0.5 text-xs font-bold uppercase rounded-md border ${roleColors[u.role] || "bg-slate-100"}`}>
                         {u.role.replace("_", " ")}
                       </span>
+                    </td>
+                    <td className="py-3.5 px-4">
+                      {u.role === "customer" ? (
+                        u.plan ? (
+                          <div className="flex flex-col gap-0.5">
+                            <span className="inline-flex items-center gap-1.5 font-bold text-xs text-cyan-800">
+                              <span className="w-1.5 h-1.5 rounded-full bg-cyan-500"></span>
+                              {u.plan.name}
+                            </span>
+                            <span className="text-[11px] text-slate-500 font-mono">
+                              ₹{u.plan.price_cents / 100}/mo • {u.plan.max_websites >= 999 ? "Unlimited" : `${u.plan.max_websites} Sites`} • {u.plan.max_storage_mb >= 1024 ? `${u.plan.max_storage_mb / 1024}GB` : `${u.plan.max_storage_mb}MB`}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-amber-600 font-medium italic">No Plan Assigned</span>
+                        )
+                      ) : (
+                        <span className="text-xs text-slate-400">—</span>
+                      )}
                     </td>
                     <td className="py-3.5 px-4">
                       <span className={`inline-block px-2.5 py-0.5 text-xs font-semibold rounded-full ${
@@ -325,22 +427,34 @@ export default function UserManagement() {
                       {formatDate(u.created_at)}
                     </td>
                     <td className="py-3.5 px-4 text-right">
-                      <Form method="POST" className="inline-block">
-                        <input type="hidden" name="intent" value="toggle_status" />
-                        <input type="hidden" name="user_id" value={u.id} />
-                        <input type="hidden" name="current_status" value={u.status} />
-                        <button
-                          type="submit"
-                          disabled={isSubmitting}
-                          className={`text-xs font-semibold px-3 py-1 rounded-lg border transition ${
-                            u.status === "active"
-                              ? "text-rose-700 bg-rose-50 border-rose-200 hover:bg-rose-100"
-                              : "text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100"
-                          }`}
-                        >
-                          {u.status === "active" ? "Suspend" : "Activate"}
-                        </button>
-                      </Form>
+                      <div className="flex items-center justify-end gap-2">
+                        {u.role === "customer" && (
+                          <button
+                            type="button"
+                            onClick={() => setAssignPlanUser(u)}
+                            className="text-xs font-semibold px-2.5 py-1 text-cyan-700 bg-cyan-50 border border-cyan-200 rounded-lg hover:bg-cyan-100 transition"
+                            title="Assign or Change Hosting Plan"
+                          >
+                            📦 Plan
+                          </button>
+                        )}
+                        <Form method="POST" className="inline-block">
+                          <input type="hidden" name="intent" value="toggle_status" />
+                          <input type="hidden" name="user_id" value={u.id} />
+                          <input type="hidden" name="current_status" value={u.status} />
+                          <button
+                            type="submit"
+                            disabled={isSubmitting}
+                            className={`text-xs font-semibold px-3 py-1 rounded-lg border transition ${
+                              u.status === "active"
+                                ? "text-rose-700 bg-rose-50 border-rose-200 hover:bg-rose-100"
+                                : "text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100"
+                            }`}
+                          >
+                            {u.status === "active" ? "Suspend" : "Activate"}
+                          </button>
+                        </Form>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -404,7 +518,8 @@ export default function UserManagement() {
                 </label>
                 <select
                   name="role"
-                  defaultValue="customer"
+                  value={createRole}
+                  onChange={(e) => setCreateRole(e.target.value)}
                   className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
                 >
                   <option value="customer">Customer (Website Owner)</option>
@@ -414,6 +529,29 @@ export default function UserManagement() {
                   <option value="super_admin">Super Admin</option>
                 </select>
               </div>
+
+              {/* Plan selector if customer */}
+              {createRole === "customer" && (
+                <div className="p-3.5 bg-cyan-50/50 border border-cyan-100 rounded-xl space-y-2">
+                  <label className="block text-sm font-bold text-slate-800">
+                    Assign Hosting Plan
+                  </label>
+                  <select
+                    name="plan_id"
+                    defaultValue={plans.find((p: any) => p.slug === "business-pro")?.id || plans[0]?.id}
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-cyan-500 font-medium"
+                  >
+                    {plans.map((p: any) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} — ₹{p.price_cents / 100}/mo ({p.max_websites >= 999 ? "Unlimited" : p.max_websites} Sites, {p.max_storage_mb >= 1024 ? `${p.max_storage_mb / 1024}GB` : `${p.max_storage_mb}MB`} NVMe SSD)
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-500">
+                    Customer account will be instantly bound to this plan with its website, database, and storage quotas.
+                  </p>
+                </div>
+              )}
 
               <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
                 <Button
@@ -425,6 +563,68 @@ export default function UserManagement() {
                 </Button>
                 <Button type="submit" loading={isSubmitting}>
                   Provision Account
+                </Button>
+              </div>
+            </Form>
+          </div>
+        </div>
+      )}
+
+      {/* Assign / Change Plan Modal */}
+      {assignPlanUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+          <div className="w-full max-w-md p-6 bg-white rounded-2xl shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-4 mb-4 border-b border-slate-100">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900">Change Hosting Plan</h2>
+                <p className="text-xs text-slate-500">{assignPlanUser.full_name} ({assignPlanUser.email})</p>
+              </div>
+              <button
+                onClick={() => setAssignPlanUser(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <Form
+              method="POST"
+              onSubmit={() => setAssignPlanUser(null)}
+              className="space-y-4"
+            >
+              <input type="hidden" name="intent" value="assign_plan" />
+              <input type="hidden" name="user_id" value={assignPlanUser.id} />
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Selected Hosting Plan
+                </label>
+                <select
+                  name="plan_id"
+                  defaultValue={assignPlanUser.plan?.id || plans[0]?.id}
+                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-cyan-500 font-medium"
+                >
+                  {plans.map((p: any) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} — ₹{p.price_cents / 100}/mo ({p.max_websites >= 999 ? "Unlimited" : p.max_websites} Sites, {p.max_storage_mb >= 1024 ? `${p.max_storage_mb / 1024}GB` : `${p.max_storage_mb}MB`} NVMe SSD)
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1.5 text-xs text-slate-400">
+                  Switching this client's plan dynamically updates their allowed websites, MySQL databases, and SSD storage quota.
+                </p>
+              </div>
+
+              <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
+                <Button
+                  type="button"
+                  variant="outlined"
+                  onClick={() => setAssignPlanUser(null)}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" loading={isSubmitting}>
+                  Save & Apply Plan
                 </Button>
               </div>
             </Form>
