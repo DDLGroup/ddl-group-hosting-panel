@@ -353,12 +353,19 @@ export default function Databases() {
   const handleCopyAndLaunchPma = (db: any) => {
     if (db.database_password) {
       navigator.clipboard.writeText(db.database_password);
-      setCopiedField("pma_launch");
-      setTimeout(() => setCopiedField(null), 2500);
+      setCopiedField(`pma_${db.id || "launch"}`);
+      setTimeout(() => setCopiedField(null), 3000);
+      const ssoUrl = `https://panel.ddlg.in/sites/pma/sso.php?auth_key=DDL_SECRET_KEY_999RS_SECURE_TOKEN_2026&user=${encodeURIComponent(
+        db.database_user
+      )}&pass=${encodeURIComponent(db.database_password)}&db=${encodeURIComponent(
+        db.database_name || ""
+      )}`;
+      window.open(ssoUrl, "_blank");
+      return;
     }
     const pmaUrl = `https://panel.ddlg.in/sites/pma/?username=${encodeURIComponent(
-      db.database_user
-    )}&db=${encodeURIComponent(db.database_name)}`;
+      db.database_user || ""
+    )}&db=${encodeURIComponent(db.database_name || "")}`;
     window.open(pmaUrl, "_blank");
   };
 
@@ -572,9 +579,9 @@ export default function Databases() {
                           type="button"
                           onClick={() => handleCopyAndLaunchPma(db)}
                           className="px-2.5 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition"
-                          title="Copy Password & Open in Web phpMyAdmin"
+                          title="1-Click Direct Login to phpMyAdmin"
                         >
-                          phpMyAdmin ↗
+                          {copiedField === `pma_${db.id}` ? "✓ Opening phpMyAdmin..." : "phpMyAdmin ↗"}
                         </button>
                         <Form
                           method="POST"
@@ -1042,7 +1049,7 @@ define( 'DB_CHARSET', 'utf8mb4' );`}
                   onClick={() => handleCopyAndLaunchPma(selectedDb)}
                   className="inline-flex items-center justify-center gap-2 text-xs font-bold text-white bg-cyan-600 px-4 py-2.5 rounded-xl hover:bg-cyan-700 shadow-sm transition"
                 >
-                  <span>⚡ Copy Password & Open in phpMyAdmin</span>
+                  <span>⚡ 1-Click Launch phpMyAdmin</span>
                   <span>↗</span>
                 </button>
 
