@@ -356,12 +356,9 @@ export default function Databases() {
       setCopiedField("pma_launch");
       setTimeout(() => setCopiedField(null), 2500);
     }
-    const hostWithPort = db.database_host?.includes(":")
-      ? db.database_host
-      : `${db.database_host || defaultHost}:3306`;
-    const pmaUrl = `https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(
-      hostWithPort
-    )}&username=${encodeURIComponent(db.database_user)}&db=${encodeURIComponent(db.database_name)}`;
+    const pmaUrl = `https://panel.ddlg.in/sites/pma/?username=${encodeURIComponent(
+      db.database_user
+    )}&db=${encodeURIComponent(db.database_name)}`;
     window.open(pmaUrl, "_blank");
   };
 
@@ -393,7 +390,7 @@ export default function Databases() {
 
         <div className="flex items-center gap-3">
           <a
-            href={`https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(defaultHost + ":3306")}`}
+            href="https://panel.ddlg.in/sites/pma/"
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-slate-700 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 shadow-xs transition"
@@ -440,7 +437,7 @@ export default function Databases() {
         </div>
         <div className="shrink-0 flex items-center gap-2">
           <a
-            href={`https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(defaultHost + ":3306")}`}
+            href="https://panel.ddlg.in/sites/pma/"
             target="_blank"
             rel="noreferrer"
             className="px-3.5 py-2 text-xs font-bold text-slate-900 bg-cyan-400 hover:bg-cyan-300 rounded-xl transition shadow-xs flex items-center gap-1.5"

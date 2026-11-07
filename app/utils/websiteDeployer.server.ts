@@ -348,12 +348,35 @@ export async function purgeExecutionNodeSite(subdomain: string, serverNodeId?: s
   }
 }
 
+// In-memory cache for high-throughput, low-latency edge delivery
+const domainCache = new Map<string, { subdomain: string; expiresAt: number }>();
+const fileMemoryCache = new Map<string, { buffer: Buffer; contentType: string; expiresAt: number }>();
+
 /**
- * Serves a website asset from Supabase Storage by subdomain and file path.
+ * Serves a website asset from Supabase Storage by subdomain and file path with edge caching.
  */
 export async function serveCloudWebsiteFile(subdomain: string, rawPath: string = "index.html") {
   if (!rawPath || rawPath === "" || rawPath.endsWith("/")) {
     rawPath += "index.html";
+  }
+
+  // Check memory cache
+  const cacheKey = `${subdomain}/${rawPath}`;
+  const now = Date.now();
+  const cached = fileMemoryCache.get(cacheKey);
+  if (cached && now < cached.expiresAt) {
+    const isStatic = /\.(css|js|png|jpg|jpeg|gif|ico|svg|webp|woff2|woff|ttf|eot)$/i.test(rawPath);
+    return new Response(cached.buffer, {
+      status: 200,
+      headers: {
+        "Content-Type": cached.contentType,
+        "Cache-Control": isStatic
+          ? "public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400, immutable"
+          : "public, max-age=60, s-maxage=300, stale-while-revalidate=600",
+        "X-Powered-By": "DDL Group Cloud Hosting Engine",
+        "X-Cache-Status": "HIT-MEMORY",
+      },
+    });
   }
 
   const supabaseAdmin = getSupabaseAdminClient();
@@ -418,19 +441,32 @@ export async function serveCloudWebsiteFile(subdomain: string, rawPath: string =
   const arrayBuffer = await fileBlob.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
   const contentType = getMimeType(rawPath);
+  const isStatic = /\.(css|js|png|jpg|jpeg|gif|ico|svg|webp|woff2|woff|ttf|eot)$/i.test(rawPath);
+
+  // Store in memory cache (files under 3MB)
+  if (buffer.length < 3 * 1024 * 1024) {
+    fileMemoryCache.set(cacheKey, {
+      buffer,
+      contentType,
+      expiresAt: now + (isStatic ? 10 * 60 * 1000 : 3 * 60 * 1000), // 10 min for static, 3 min for html
+    });
+  }
 
   return new Response(buffer, {
     status: 200,
     headers: {
       "Content-Type": contentType,
-      "Cache-Control": "public, max-age=300",
+      "Cache-Control": isStatic
+        ? "public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400, immutable"
+        : "public, max-age=60, s-maxage=300, stale-while-revalidate=600",
       "X-Powered-By": "DDL Group Cloud Hosting Engine",
+      "X-Cache-Status": "MISS-POPULATED",
     },
   });
 }
 
 /**
- * Inspects incoming Host header and serves custom domain website if mapped.
+ * Inspects incoming Host header and serves custom domain website if mapped with memory caching.
  */
 export async function handleCustomDomainRequest(request: Request, relativePath: string = "index.html") {
   const hostHeader = request.headers.get("x-forwarded-host") || request.headers.get("host") || "";
@@ -448,6 +484,13 @@ export async function handleCustomDomainRequest(request: Request, relativePath: 
     return null;
   }
 
+  // Check in-memory domain cache
+  const now = Date.now();
+  const cachedDomain = domainCache.get(host);
+  if (cachedDomain && now < cachedDomain.expiresAt) {
+    return serveCloudWebsiteFile(cachedDomain.subdomain, relativePath);
+  }
+
   const supabaseAdmin = getSupabaseAdminClient();
   const { data: domainRecord } = await supabaseAdmin
     .from("domains")
@@ -460,6 +503,13 @@ export async function handleCustomDomainRequest(request: Request, relativePath: 
   }
 
   const subdomain = (domainRecord.hosting_projects as any).subdomain;
+  
+  // Cache domain resolution for 5 minutes
+  domainCache.set(host, {
+    subdomain,
+    expiresAt: now + 5 * 60 * 1000,
+  });
+
   return serveCloudWebsiteFile(subdomain, relativePath);
 }
 
