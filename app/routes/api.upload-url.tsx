@@ -8,7 +8,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const projectId = url.searchParams.get("project_id");
   const filename = url.searchParams.get("filename") || "upload.zip";
   const type = url.searchParams.get("type") || "deploy_zip";
-  const currentPath = (url.searchParams.get("current_path") || "").replace(/^\/+|\/+$/g, "");
+  const currentPath = (url.searchParams.get("current_path") || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "");
 
   if (!projectId) {
     return Response.json({ error: "Missing project_id parameter." }, { status: 400 });
@@ -32,7 +34,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return Response.json({ error: "Website project not found or access denied." }, { status: 404 });
   }
 
-  const cleanFileName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+  // Normalize path segments, preserving subfolders and spaces while blocking path traversal
+  const normalizedFile = filename
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")
+    .map((seg) => seg.trim())
+    .filter((seg) => seg && seg !== ".." && seg !== ".")
+    .join("/");
+
   let storagePath = "";
 
   if (type === "deploy_zip") {
@@ -40,7 +50,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     storagePath = `_temp_zips/${project.subdomain}_${Date.now()}_${randomSuffix}.zip`;
   } else {
     const targetPrefix = currentPath ? `${currentPath}/`.replace(/\/+$/, "/") : "";
-    storagePath = `${project.subdomain}/${targetPrefix}${cleanFileName}`;
+    storagePath = `${project.subdomain}/${targetPrefix}${normalizedFile}`;
   }
 
   const { data, error } = await supabaseAdmin.storage
@@ -59,7 +69,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     signedUrl: data.signedUrl,
     storagePath,
     token: data.token,
-    cleanFileName,
+    cleanFileName: normalizedFile,
     subdomain: project.subdomain,
   });
 }

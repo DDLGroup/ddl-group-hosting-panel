@@ -3,7 +3,17 @@ import {
   unstable_createMemoryUploadHandler,
   unstable_parseMultipartFormData,
 } from "@remix-run/node";
-import { Form, Link, useActionData, useLoaderData, useNavigation, useSearchParams, useSubmit } from "@remix-run/react";
+import {
+  Form,
+  Link,
+  isRouteErrorResponse,
+  useActionData,
+  useLoaderData,
+  useNavigation,
+  useRouteError,
+  useSearchParams,
+  useSubmit,
+} from "@remix-run/react";
 import { useEffect, useState } from "react";
 import Button from "~/components/Button";
 import { requireUserProfile } from "~/utils/auth.server";
@@ -134,11 +144,27 @@ export async function action({ request }: ActionFunctionArgs) {
   const { profile } = await requireUserProfile(request);
   const supabaseAdmin = getSupabaseAdminClient();
 
-  const uploadHandler = unstable_createMemoryUploadHandler({
-    maxPartSize: 50 * 1024 * 1024, // 50MB
-  });
+  let formData: FormData;
+  const contentType = request.headers.get("content-type") || "";
 
-  const formData = await unstable_parseMultipartFormData(request, uploadHandler);
+  try {
+    if (contentType.includes("multipart/form-data")) {
+      const uploadHandler = unstable_createMemoryUploadHandler({
+        maxPartSize: 50 * 1024 * 1024, // 50MB
+      });
+      formData = await unstable_parseMultipartFormData(request, uploadHandler);
+    } else {
+      formData = await request.formData();
+    }
+  } catch (err: any) {
+    console.error("[FileManager Action] FormData parse error:", err);
+    try {
+      formData = await request.formData();
+    } catch {
+      return Response.json({ error: "Failed to parse form submission." }, { status: 400 });
+    }
+  }
+
   const intent = String(formData.get("intent") || "");
   const projectId = String(formData.get("project_id") || "");
   const currentPath = sanitizePath(String(formData.get("current_path") || ""));
@@ -473,6 +499,7 @@ export default function FileManager() {
 
   // Modals state
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [uploadMode, setUploadMode] = useState<"files" | "folder">("files");
   const [showNewFileModal, setShowNewFileModal] = useState(false);
   const [showNewFolderModal, setShowNewFolderModal] = useState(false);
   const [showDeployZipModal, setShowDeployZipModal] = useState(false);
@@ -562,51 +589,67 @@ export default function FileManager() {
     }
   };
 
-  // Direct File upload bypassing Netlify 6MB payload limits
+  // Direct File & Folder upload bypassing Netlify 6MB payload limits
   const handleDirectFileUpload = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const form = e.currentTarget;
-    const fileInput = form.querySelector('input[name="uploaded_files"]') as HTMLInputElement;
+    const fileInput =
+      uploadMode === "folder"
+        ? (form.querySelector('input[name="uploaded_folder"]') as HTMLInputElement)
+        : (form.querySelector('input[name="uploaded_files"]') as HTMLInputElement);
     const files = Array.from(fileInput?.files || []);
     if (files.length === 0) return;
 
-    // For files under 4MB total, regular submission works fine
-    const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
-    if (totalBytes < 4 * 1024 * 1024) {
-      submit(form);
-      setShowUploadModal(false);
+    // Filter out OS hidden bookkeeping files
+    const validFiles = files.filter(
+      (f) => !f.name.startsWith(".") && f.name !== "Thumbs.db" && f.size > 0
+    );
+
+    if (validFiles.length === 0) {
+      alert("No valid files found to upload.");
       return;
     }
 
     setUploadProgress({
       isUploading: true,
       percent: 0,
-      message: `Starting direct cloud upload for ${files.length} file(s)...`,
+      message: `Starting direct cloud upload for ${validFiles.length} file(s)...`,
     });
 
     try {
       const uploadedFileList: Array<{ path: string }> = [];
 
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const percentBase = Math.round((i / files.length) * 100);
+      for (let i = 0; i < validFiles.length; i++) {
+        const file = validFiles[i];
+        const percent = Math.round((i / validFiles.length) * 100);
+
+        // Compute relative path: if folder upload, strip top folder name (e.g. "dist/css/style.css" -> "css/style.css")
+        let relativeFilePath = file.name;
+        if (uploadMode === "folder" && file.webkitRelativePath) {
+          const pathParts = file.webkitRelativePath.split("/");
+          if (pathParts.length > 1) {
+            relativeFilePath = pathParts.slice(1).join("/");
+          } else {
+            relativeFilePath = file.webkitRelativePath;
+          }
+        }
 
         setUploadProgress({
           isUploading: true,
-          percent: percentBase,
-          message: `Uploading ${file.name} (${i + 1}/${files.length})...`,
+          percent,
+          message: `Uploading ${relativeFilePath} (${i + 1}/${validFiles.length})...`,
         });
 
         const urlRes = await fetch(
           `/api/upload-url?project_id=${encodeURIComponent(
             selectedProjectId
-          )}&filename=${encodeURIComponent(file.name)}&type=file&current_path=${encodeURIComponent(
+          )}&filename=${encodeURIComponent(relativeFilePath)}&type=file&current_path=${encodeURIComponent(
             currentPath
           )}`
         );
         const urlData = await urlRes.json();
         if (!urlRes.ok || !urlData.signedUrl) {
-          throw new Error(urlData.error || `Failed to get upload URL for ${file.name}`);
+          throw new Error(urlData.error || `Failed to get upload URL for ${relativeFilePath}`);
         }
 
         await new Promise((resolve, reject) => {
@@ -617,13 +660,15 @@ export default function FileManager() {
 
           xhr.onload = () => {
             if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.response);
-            else reject(new Error(`Storage error on ${file.name}: HTTP ${xhr.status}`));
+            else reject(new Error(`Storage error on ${relativeFilePath}: HTTP ${xhr.status}`));
           };
-          xhr.onerror = () => reject(new Error(`Upload failed for ${file.name}`));
+          xhr.onerror = () => reject(new Error(`Upload failed for ${relativeFilePath}`));
           xhr.send(file);
         });
 
-        const relPath = currentPath ? `${currentPath}/${urlData.cleanFileName}` : urlData.cleanFileName;
+        const relPath = currentPath
+          ? `${currentPath}/${urlData.cleanFileName}`
+          : urlData.cleanFileName;
         uploadedFileList.push({ path: relPath });
       }
 
@@ -1337,6 +1382,32 @@ export default function FileManager() {
               <input type="hidden" name="project_id" value={selectedProjectId} />
               <input type="hidden" name="current_path" value={currentPath} />
 
+              {/* Mode Toggle: Files vs Folder */}
+              <div className="flex bg-slate-100 p-1 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => setUploadMode("files")}
+                  className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition ${
+                    uploadMode === "files"
+                      ? "bg-white text-cyan-800 shadow-xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  📄 Individual Files
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUploadMode("folder")}
+                  className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition ${
+                    uploadMode === "folder"
+                      ? "bg-white text-cyan-800 shadow-xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  📁 Entire Folder (e.g. dist)
+                </button>
+              </div>
+
               <div className="p-3 bg-cyan-50/70 border border-cyan-100 rounded-xl text-xs text-cyan-800 space-y-1">
                 <div className="font-bold flex items-center gap-1">
                   <span>ℹ️ Upload Target:</span>
@@ -1345,22 +1416,42 @@ export default function FileManager() {
                   </code>
                 </div>
                 <p>
-                  Files will be uploaded directly to this directory. If a file with the same name already exists, it will be <strong>overwritten (pasted over)</strong> automatically.
+                  {uploadMode === "folder"
+                    ? "Upload an entire website folder (such as 'dist'). Subfolders like css, js, and images are preserved and mapped directly into this target."
+                    : "Files will be uploaded directly to this directory. If a file with the same name already exists, it will be overwritten automatically."}
                 </p>
               </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase mb-2">
-                  Select Files (HTML, CSS, JS, Images, Media) *
-                </label>
-                <input
-                  type="file"
-                  name="uploaded_files"
-                  multiple
-                  required
-                  className="w-full text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-cyan-50 file:text-cyan-700 hover:file:bg-cyan-100 border border-slate-200 rounded-xl p-2"
-                />
-              </div>
+              {uploadMode === "files" ? (
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-2">
+                    Select Files (HTML, CSS, JS, Images, Media) *
+                  </label>
+                  <input
+                    type="file"
+                    name="uploaded_files"
+                    multiple
+                    required
+                    className="w-full text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-cyan-50 file:text-cyan-700 hover:file:bg-cyan-100 border border-slate-200 rounded-xl p-2"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-2">
+                    Select Entire Folder (e.g. dist, build, public) *
+                  </label>
+                  <input
+                    type="file"
+                    name="uploaded_folder"
+                    // @ts-ignore
+                    webkitdirectory=""
+                    directory=""
+                    multiple
+                    required
+                    className="w-full text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 border border-slate-200 rounded-xl p-2"
+                  />
+                </div>
+              )}
 
               <div className="flex items-center gap-2 text-xs text-slate-600">
                 <input
@@ -1385,10 +1476,14 @@ export default function FileManager() {
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || !!uploadProgress}
                   className="px-4 py-2 text-xs font-semibold text-white bg-cyan-600 rounded-xl hover:bg-cyan-700 disabled:opacity-50"
                 >
-                  {isSubmitting ? "Uploading..." : "Upload & Overwrite"}
+                  {uploadProgress
+                    ? "Uploading..."
+                    : uploadMode === "folder"
+                    ? "Upload Entire Folder"
+                    : "Upload & Overwrite"}
                 </button>
               </div>
             </Form>
@@ -1661,6 +1756,53 @@ export default function FileManager() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+  const [searchParams] = useSearchParams();
+  const projectId = searchParams.get("project") || "";
+
+  let errorMessage = "An unexpected error occurred in File Manager.";
+  if (isRouteErrorResponse(error)) {
+    errorMessage = `${error.status} ${error.statusText}: ${typeof error.data === "string" ? error.data : JSON.stringify(error.data)}`;
+  } else if (error instanceof Error) {
+    errorMessage = error.message;
+  }
+
+  return (
+    <div className="p-6 max-w-4xl mx-auto space-y-4">
+      <div className="p-6 bg-white rounded-2xl border border-rose-200 shadow-xl space-y-4">
+        <div className="flex items-center gap-3 text-rose-600">
+          <span className="text-2xl">⚠️</span>
+          <div>
+            <h2 className="text-lg font-bold text-slate-900">File Manager Notice</h2>
+            <p className="text-xs text-slate-500">The file manager encountered a temporary issue.</p>
+          </div>
+        </div>
+
+        <div className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs font-mono text-rose-800 break-words whitespace-pre-wrap">
+          {errorMessage}
+        </div>
+
+        <div className="flex items-center gap-3 pt-2">
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="px-4 py-2 text-xs font-bold text-white bg-cyan-600 rounded-xl hover:bg-cyan-700 shadow-sm transition"
+          >
+            🔄 Reload File Manager
+          </button>
+          <a
+            href={projectId ? `/dashboard/files?project=${projectId}` : "/dashboard/files"}
+            className="px-4 py-2 text-xs font-bold text-slate-700 bg-slate-100 rounded-xl hover:bg-slate-200 transition"
+          >
+            Go to File Manager Root
+          </a>
+        </div>
+      </div>
     </div>
   );
 }
