@@ -8,10 +8,13 @@ import {
   DEFAULT_CLUSTER_HOST,
   DEFAULT_CLUSTER_PORT,
   deleteDatabaseSecret,
+  dropTiDBDatabase,
   generateSecurePassword,
   getDatabaseDetails,
+  provisionTiDBDatabase,
   setDatabaseDetails,
   testMySQLConnection,
+  updateTiDBUserPassword,
 } from "~/utils/databaseSecrets.server";
 import { formatDate } from "~/utils/formatDate";
 import { getSupabaseAdminClient } from "~/utils/supabase.server";
@@ -62,6 +65,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     projects: projectsRes.data || [],
     serverNodes: nodesRes.data || [],
     defaultHost: DEFAULT_CLUSTER_HOST,
+    defaultPort: DEFAULT_CLUSTER_PORT,
   });
 }
 
@@ -119,6 +123,24 @@ export async function action({ request }: ActionFunctionArgs) {
     const cleanDbName = rawDbName.replace(/[^a-zA-Z0-9_\-]/g, "");
     const cleanUser = rawDbUser.replace(/[^a-zA-Z0-9_\-]/g, "");
 
+    // Automatically provision database and user on TiDB Cloud
+    if (dbHost.includes("tidbcloud.com")) {
+      const provRes = await provisionTiDBDatabase({
+        database_name: cleanDbName,
+        database_user: cleanUser,
+        database_password: dbPassword,
+      });
+
+      if (!provRes.success) {
+        return Response.json(
+          {
+            error: `TiDB Cloud Provisioning Failed: ${provRes.error}. (Please verify root cluster credentials).`,
+          },
+          { status: 500 }
+        );
+      }
+    }
+
     const { data: newDb, error } = await supabaseAdmin
       .from("databases")
       .insert({
@@ -145,7 +167,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     return Response.json({
-      success: `MySQL database "${cleanDbName}" registered successfully on cluster host ${dbHost}!`,
+      success: `🎉 MySQL database "${cleanDbName}" automatically provisioned and active on TiDB Cloud (Port ${dbPort})!`,
     });
   }
 
@@ -164,7 +186,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Verify ownership
-    let q = supabaseAdmin.from("databases").select("id, database_name").eq("id", dbId);
+    let q = supabaseAdmin.from("databases").select("id, database_name, database_user").eq("id", dbId);
     if (profile.role === "customer") {
       q = q.eq("customer_id", profile.id);
     }
@@ -175,6 +197,13 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     const current = await getDatabaseDetails(dbId);
+    if ((newHost || current.database_host)?.includes("tidbcloud.com")) {
+      const updateRes = await updateTiDBUserPassword(db.database_user, newPassword);
+      if (!updateRes.success) {
+        return Response.json({ error: `TiDB Cloud Password Update Failed: ${updateRes.error}` }, { status: 500 });
+      }
+    }
+
     await setDatabaseDetails(dbId, {
       database_password: newPassword,
       database_host: newHost || current.database_host || DEFAULT_CLUSTER_HOST,
@@ -191,20 +220,37 @@ export async function action({ request }: ActionFunctionArgs) {
       return Response.json({ error: "Database ID is required." }, { status: 400 });
     }
 
+    // Verify ownership and get details before deleting
+    let q = supabaseAdmin.from("databases").select("id, database_name, database_user").eq("id", dbId);
+    if (profile.role === "customer") {
+      q = q.eq("customer_id", profile.id);
+    }
+    const { data: db } = await q.maybeSingle();
+
+    if (db) {
+      const details = await getDatabaseDetails(dbId);
+      if (details.database_host?.includes("tidbcloud.com")) {
+        await dropTiDBDatabase({
+          database_name: db.database_name,
+          database_user: db.database_user,
+        });
+      }
+    }
+
     const { error } = await supabaseAdmin.from("databases").delete().eq("id", dbId);
     if (error) {
       return Response.json({ error: error.message }, { status: 500 });
     }
 
     await deleteDatabaseSecret(dbId);
-    return Response.json({ success: "MySQL database deleted successfully." });
+    return Response.json({ success: "MySQL database deleted successfully from TiDB Cloud." });
   }
 
   return Response.json({ error: "Invalid action." }, { status: 400 });
 }
 
 export default function Databases() {
-  const { databases, projects, serverNodes, defaultHost } = useLoaderData<typeof loader>();
+  const { databases, projects, serverNodes, defaultHost, defaultPort } = useLoaderData<typeof loader>();
   const actionData = useActionData<{
     error?: string;
     success?: string;
@@ -261,8 +307,11 @@ export default function Databases() {
       setCopiedField("pma_launch");
       setTimeout(() => setCopiedField(null), 2500);
     }
+    const hostWithPort = db.database_host?.includes(":")
+      ? db.database_host
+      : `${db.database_host || defaultHost}:${db.database_port || defaultPort}`;
     const pmaUrl = `https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(
-      db.database_host || defaultHost
+      hostWithPort
     )}&username=${encodeURIComponent(db.database_user)}&db=${encodeURIComponent(db.database_name)}`;
     window.open(pmaUrl, "_blank");
   };
@@ -285,17 +334,17 @@ export default function Databases() {
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
             <span>MySQL Databases</span>
             <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-cyan-100 text-cyan-800 border border-cyan-200">
-              Cluster Ready
+              TiDB Cloud Powered
             </span>
           </h1>
           <p className="text-sm text-slate-500">
-            High-performance isolated MySQL databases with full credentials management and White-Label Web phpMyAdmin
+            Automated 1-click cloud MySQL databases with instant provisioning, credentials management, and phpMyAdmin access
           </p>
         </div>
 
         <div className="flex items-center gap-3">
           <a
-            href={`https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(defaultHost)}`}
+            href={`https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(defaultHost + ":" + defaultPort)}`}
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-slate-700 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 shadow-xs transition"
@@ -319,30 +368,30 @@ export default function Databases() {
       </div>
 
       {/* Cluster Guidance Card */}
-      <div className="p-4 bg-gradient-to-r from-slate-900 to-slate-800 text-white rounded-2xl shadow-sm border border-slate-700 flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="p-4 bg-gradient-to-r from-slate-900 via-slate-800 to-cyan-950 text-white rounded-2xl shadow-sm border border-slate-700 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
             <span className="text-xs uppercase tracking-wider font-bold text-cyan-400">
-              Cluster Database Engine (MariaDB 10.11)
+              TiDB Cloud Engine (MySQL 8.0 Wire-Compatible)
             </span>
           </div>
           <p className="text-sm text-slate-200">
-            Web nodes and database clusters communicate over secure private cluster networks.
+            Databases and users are provisioned 100% automatically in 1 click on TiDB Cloud Serverless.
           </p>
           <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3 pt-1">
             <span>
               Primary Cluster Host: <code className="text-cyan-300 font-mono font-bold">{defaultHost}</code>
             </span>
             <span>•</span>
-            <span>Port: <code className="text-cyan-300 font-mono">3306</code></span>
+            <span>Port: <code className="text-cyan-300 font-mono font-bold">4000</code></span>
             <span>•</span>
-            <span>Manager: <code className="text-cyan-300 font-mono">panel.ddlg.in/sites/pma/</code></span>
+            <span>File Storage: <span className="text-slate-300 font-medium">ServerByte</span></span>
           </div>
         </div>
         <div className="shrink-0 flex items-center gap-2">
           <a
-            href={`https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(defaultHost)}`}
+            href={`https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(defaultHost + ":" + defaultPort)}`}
             target="_blank"
             rel="noreferrer"
             className="px-3.5 py-2 text-xs font-bold text-slate-900 bg-cyan-400 hover:bg-cyan-300 rounded-xl transition shadow-xs flex items-center gap-1.5"
@@ -524,7 +573,7 @@ export default function Databases() {
                     MySQL Host / Cluster Host
                   </label>
                   <span className="text-[11px] font-semibold text-cyan-700 bg-cyan-50 px-2 py-0.5 rounded border border-cyan-200">
-                    ServerByte Cluster
+                    TiDB Cloud Serverless
                   </span>
                 </div>
                 <input
@@ -537,7 +586,7 @@ export default function Databases() {
                   className="w-full px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500 bg-slate-50"
                 />
                 <p className="mt-1 text-[11px] text-slate-400">
-                  Do not use <code>localhost</code>. ServerByte databases run on dedicated cluster hostnames.
+                  Automated provisioning on TiDB Cloud Serverless (MySQL 8.0 wire-compatible) on port 4000.
                 </p>
               </div>
 
@@ -810,11 +859,11 @@ export default function Databases() {
                   <span className="text-[11px] font-bold text-slate-400 uppercase block">Port</span>
                   <div className="flex items-center justify-between mt-1">
                     <span className="font-mono font-bold text-slate-900">
-                      {selectedDb.database_port || 3306}
+                      {selectedDb.database_port || defaultPort}
                     </span>
                     <button
                       type="button"
-                      onClick={() => copyToClipboard(String(selectedDb.database_port || 3306), "port")}
+                      onClick={() => copyToClipboard(String(selectedDb.database_port || defaultPort), "port")}
                       className="text-xs text-cyan-600 hover:underline"
                     >
                       {copiedField === "port" ? "Copied!" : "Copy"}
@@ -896,7 +945,11 @@ export default function Databases() {
                   <button
                     type="button"
                     onClick={() => {
-                      const snippet = `define( 'DB_NAME', '${selectedDb.database_name}' );\ndefine( 'DB_USER', '${selectedDb.database_user}' );\ndefine( 'DB_PASSWORD', '${selectedDb.database_password || ""}' );\ndefine( 'DB_HOST', '${selectedDb.database_host || defaultHost}' );\ndefine( 'DB_CHARSET', 'utf8mb4' );`;
+                      const hostStr =
+                        selectedDb.database_port && selectedDb.database_port !== 3306
+                          ? `${selectedDb.database_host || defaultHost}:${selectedDb.database_port}`
+                          : selectedDb.database_host || defaultHost;
+                      const snippet = `define( 'DB_NAME', '${selectedDb.database_name}' );\ndefine( 'DB_USER', '${selectedDb.database_user}' );\ndefine( 'DB_PASSWORD', '${selectedDb.database_password || ""}' );\ndefine( 'DB_HOST', '${hostStr}' );\ndefine( 'DB_CHARSET', 'utf8mb4' );`;
                       copyToClipboard(snippet, "snippet");
                     }}
                     className="text-xs font-semibold text-cyan-600 hover:underline"
@@ -908,7 +961,11 @@ export default function Databases() {
 {`define( 'DB_NAME', '${selectedDb.database_name}' );
 define( 'DB_USER', '${selectedDb.database_user}' );
 define( 'DB_PASSWORD', '${selectedDb.database_password || ""}' );
-define( 'DB_HOST', '${selectedDb.database_host || defaultHost}' );
+define( 'DB_HOST', '${
+  selectedDb.database_port && selectedDb.database_port !== 3306
+    ? `${selectedDb.database_host || defaultHost}:${selectedDb.database_port}`
+    : selectedDb.database_host || defaultHost
+}' );
 define( 'DB_CHARSET', 'utf8mb4' );`}
                 </pre>
               </div>
