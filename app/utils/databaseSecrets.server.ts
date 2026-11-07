@@ -347,3 +347,63 @@ export async function testMySQLConnection(params: {
     };
   }
 }
+
+/**
+ * Executes a client SQL query safely on their provisioned database
+ */
+export async function executeDatabaseQuery(params: {
+  database_name: string;
+  sql: string;
+}): Promise<{
+  success: boolean;
+  columns?: string[];
+  rows?: any[];
+  affectedRows?: number;
+  executionTimeMs?: number;
+  error?: string;
+}> {
+  const cleanDb = params.database_name.replace(/[^a-zA-Z0-9_\-]/g, "");
+  const trimmedSql = params.sql.trim();
+
+  if (!trimmedSql) {
+    return { success: false, error: "SQL query cannot be empty." };
+  }
+
+  const startTime = Date.now();
+  try {
+    const conn = await mysql.createConnection({
+      host: DEFAULT_CLUSTER_HOST,
+      port: DEFAULT_CLUSTER_PORT,
+      user: TIDB_ROOT_USER,
+      password: TIDB_ROOT_PASSWORD,
+      database: cleanDb,
+      ssl: { minVersion: "TLSv1.2", rejectUnauthorized: true },
+    });
+
+    const [result]: any = await conn.query(trimmedSql);
+    await conn.end();
+
+    const executionTimeMs = Date.now() - startTime;
+
+    if (Array.isArray(result)) {
+      const columns = result.length > 0 ? Object.keys(result[0]) : [];
+      return {
+        success: true,
+        columns,
+        rows: result.slice(0, 100), // limit preview to 100 rows for speed
+        executionTimeMs,
+      };
+    }
+
+    return {
+      success: true,
+      affectedRows: result.affectedRows,
+      executionTimeMs,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err.message || "Failed to execute SQL query on database.",
+    };
+  }
+}

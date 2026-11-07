@@ -9,6 +9,7 @@ import {
   DEFAULT_CLUSTER_PORT,
   deleteDatabaseSecret,
   dropTiDBDatabase,
+  executeDatabaseQuery,
   generateSecurePassword,
   getDatabaseDetails,
   provisionTiDBDatabase,
@@ -249,6 +250,41 @@ export async function action({ request }: ActionFunctionArgs) {
     return Response.json({ success: "MySQL database deleted successfully from TiDB Cloud." });
   }
 
+  // Execute SQL in Studio Action
+  if (intent === "run_sql") {
+    const dbName = String(formData.get("db_name") || "").trim();
+    const sqlQuery = String(formData.get("sql_query") || "").trim();
+
+    if (!dbName || !sqlQuery) {
+      return Response.json({ sqlError: "Database name and SQL query are required." }, { status: 400 });
+    }
+
+    // Verify ownership
+    let q = supabaseAdmin.from("databases").select("id, database_name").eq("database_name", dbName);
+    if (profile.role === "customer") {
+      q = q.eq("customer_id", profile.id);
+    }
+    const { data: db, error: fetchErr } = await q.maybeSingle();
+    if (fetchErr || !db) {
+      return Response.json({ sqlError: "Database not found or access denied." }, { status: 404 });
+    }
+
+    const result = await executeDatabaseQuery({ database_name: dbName, sql: sqlQuery });
+    if (!result.success) {
+      return Response.json({ sqlError: result.error, sqlQuery, dbName });
+    }
+
+    return Response.json({
+      sqlSuccess: true,
+      sqlQuery,
+      dbName,
+      columns: result.columns || [],
+      rows: result.rows || [],
+      affectedRows: result.affectedRows,
+      executionTimeMs: result.executionTimeMs,
+    });
+  }
+
   return Response.json({ error: "Invalid action." }, { status: 400 });
 }
 
@@ -259,6 +295,14 @@ export default function Databases() {
     success?: string;
     testError?: string;
     testSuccess?: string;
+    sqlSuccess?: boolean;
+    sqlError?: string;
+    sqlQuery?: string;
+    dbName?: string;
+    columns?: string[];
+    rows?: any[];
+    affectedRows?: number;
+    executionTimeMs?: number;
   }>();
   const navigation = useNavigation();
   const submit = useSubmit();
@@ -267,6 +311,8 @@ export default function Databases() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedDb, setSelectedDb] = useState<any>(null);
   const [editingPasswordDb, setEditingPasswordDb] = useState<any>(null);
+  const [sqlStudioDb, setSqlStudioDb] = useState<any>(null);
+  const [sqlQueryInput, setSqlQueryInput] = useState("SHOW TABLES;");
 
   // Password fields state
   const [createDbName, setCreateDbName] = useState("");
@@ -466,7 +512,7 @@ export default function Databases() {
                       {db.database_user}
                     </td>
                     <td className="py-3.5 px-4 font-mono text-xs text-cyan-800">
-                      {db.database_host || defaultHost}:{db.database_port || 3306}
+                      {db.database_host || defaultHost}:{db.database_port || defaultPort}
                     </td>
                     <td className="py-3.5 px-4 text-xs font-medium text-slate-700">
                       {db.hosting_projects?.name ? (
@@ -509,6 +555,18 @@ export default function Databases() {
                           title="Update Database Password"
                         >
                           ✏️ Password
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSqlStudioDb(db);
+                            setSqlQueryInput("SHOW TABLES;");
+                          }}
+                          className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 transition flex items-center gap-1"
+                          title="Open Interactive SQL Studio"
+                        >
+                          <span>⚡</span>
+                          <span>SQL Studio</span>
                         </button>
                         <button
                           type="button"
@@ -991,6 +1049,157 @@ define( 'DB_CHARSET', 'utf8mb4' );`}
                   Close
                 </Button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Interactive SQL Studio Modal */}
+      {sqlStudioDb && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="w-full max-w-4xl p-6 bg-white rounded-2xl shadow-2xl border border-slate-200 max-h-[92vh] flex flex-col">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold text-lg">
+                  ⚡
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <span>SQL Studio</span>
+                    <span className="text-xs font-mono font-semibold px-2.5 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200">
+                      {sqlStudioDb.database_name}
+                    </span>
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Direct live query console connected to TiDB Cloud cluster ({defaultHost})
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setSqlStudioDb(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold p-1 rounded-lg text-lg"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="pt-4 flex-1 overflow-y-auto space-y-4">
+              {/* Quick Query Shortcuts */}
+              <div className="flex items-center gap-2 text-xs">
+                <span className="font-semibold text-slate-500">Quick Queries:</span>
+                <button
+                  type="button"
+                  onClick={() => setSqlQueryInput("SHOW TABLES;")}
+                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono rounded-lg transition"
+                >
+                  SHOW TABLES;
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSqlQueryInput("SELECT VERSION(), DATABASE(), USER();")}
+                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono rounded-lg transition"
+                >
+                  CLUSTER INFO
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSqlQueryInput("SHOW TABLE STATUS;")}
+                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono rounded-lg transition"
+                >
+                  TABLE STATUS
+                </button>
+              </div>
+
+              {/* SQL Input Form */}
+              <Form method="POST" className="space-y-3">
+                <input type="hidden" name="intent" value="run_sql" />
+                <input type="hidden" name="db_name" value={sqlStudioDb.database_name} />
+
+                <div className="relative">
+                  <textarea
+                    name="sql_query"
+                    value={sqlQueryInput}
+                    onChange={(e) => setSqlQueryInput(e.target.value)}
+                    rows={4}
+                    placeholder="Enter SQL statement (e.g. SHOW TABLES; or SELECT * FROM users;)"
+                    className="w-full p-3 font-mono text-sm bg-slate-900 text-emerald-400 border border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 selection:bg-emerald-800"
+                    required
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="text-[11px] text-slate-400">
+                    Supports DDL, DML, and queries (CREATE, SELECT, INSERT, UPDATE, SHOW).
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button type="submit" loading={isSubmitting}>
+                      ▶ Run SQL Query
+                    </Button>
+                  </div>
+                </div>
+              </Form>
+
+              {/* SQL Result Feedback */}
+              {actionData?.sqlError && (
+                <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs font-mono">
+                  <span className="font-bold">Error:</span> {actionData.sqlError}
+                </div>
+              )}
+
+              {actionData?.sqlSuccess && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-slate-500 px-1">
+                    <span className="text-emerald-700 font-semibold flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-2 rounded-full bg-emerald-500"></span>
+                      Query executed successfully in {actionData.executionTimeMs}ms
+                    </span>
+                    {actionData.rows && (
+                      <span>
+                        Showing {actionData.rows.length} row{actionData.rows.length !== 1 ? "s" : ""}
+                      </span>
+                    )}
+                    {actionData.affectedRows !== undefined && (
+                      <span>{actionData.affectedRows} row(s) affected</span>
+                    )}
+                  </div>
+
+                  {actionData.rows && actionData.rows.length > 0 ? (
+                    <div className="overflow-x-auto border border-slate-200 rounded-xl max-h-72">
+                      <table className="w-full text-left text-xs font-mono text-slate-700 divide-y divide-slate-200">
+                        <thead className="bg-slate-100 text-slate-600 font-bold uppercase sticky top-0">
+                          <tr>
+                            {actionData.columns?.map((col) => (
+                              <th key={col} className="p-2.5 border-r border-slate-200 last:border-r-0">
+                                {col}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 bg-white">
+                          {actionData.rows.map((row, idx) => (
+                            <tr key={idx} className="hover:bg-slate-50">
+                              {actionData.columns?.map((col) => (
+                                <td key={col} className="p-2.5 border-r border-slate-100 last:border-r-0 truncate max-w-xs">
+                                  {typeof row[col] === "object" ? JSON.stringify(row[col]) : String(row[col] ?? "NULL")}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="p-6 text-center text-xs text-slate-400 bg-slate-50 border border-slate-200 rounded-xl font-mono">
+                      Query completed with no rows returned.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="pt-4 border-t border-slate-100 flex justify-end">
+              <Button type="button" variant="outlined" onClick={() => setSqlStudioDb(null)}>
+                Close Studio
+              </Button>
             </div>
           </div>
         </div>
