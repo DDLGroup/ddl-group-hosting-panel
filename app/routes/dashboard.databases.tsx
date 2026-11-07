@@ -358,7 +358,7 @@ export default function Databases() {
     }
     const hostWithPort = db.database_host?.includes(":")
       ? db.database_host
-      : `${db.database_host || defaultHost}:${db.database_port || defaultPort}`;
+      : `${db.database_host || defaultHost}:3306`;
     const pmaUrl = `https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(
       hostWithPort
     )}&username=${encodeURIComponent(db.database_user)}&db=${encodeURIComponent(db.database_name)}`;
@@ -393,7 +393,7 @@ export default function Databases() {
 
         <div className="flex items-center gap-3">
           <a
-            href={`https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(defaultHost + ":" + defaultPort)}`}
+            href={`https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(defaultHost + ":3306")}`}
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-slate-700 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 shadow-xs transition"
@@ -433,14 +433,14 @@ export default function Databases() {
               Primary Cluster Host: <code className="text-cyan-300 font-mono font-bold">{defaultHost}</code>
             </span>
             <span>•</span>
-            <span>Port: <code className="text-cyan-300 font-mono font-bold">4000</code></span>
+            <span>Port: <code className="text-cyan-300 font-mono font-bold">4000 / 3306</code></span>
             <span>•</span>
-            <span>File Storage: <span className="text-slate-300 font-medium">ServerByte</span></span>
+            <span>Web File Storage: <span className="text-slate-300 font-medium">ServerByte</span></span>
           </div>
         </div>
         <div className="shrink-0 flex items-center gap-2">
           <a
-            href={`https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(defaultHost + ":" + defaultPort)}`}
+            href={`https://panel.ddlg.in/sites/pma/?server=${encodeURIComponent(defaultHost + ":3306")}`}
             target="_blank"
             rel="noreferrer"
             className="px-3.5 py-2 text-xs font-bold text-slate-900 bg-cyan-400 hover:bg-cyan-300 rounded-xl transition shadow-xs flex items-center gap-1.5"
@@ -484,7 +484,7 @@ export default function Databases() {
                 <th className="py-3.5 px-4">Username</th>
                 <th className="py-3.5 px-4">Cluster Host : Port</th>
                 <th className="py-3.5 px-4">Mapped Website</th>
-                <th className="py-3.5 px-4">Server Node</th>
+                <th className="py-3.5 px-4">Database Engine</th>
                 <th className="py-3.5 px-4">Status</th>
                 <th className="py-3.5 px-4 text-right">Actions</th>
               </tr>
@@ -523,8 +523,11 @@ export default function Databases() {
                         <span className="text-slate-400 italic">Unassigned</span>
                       )}
                     </td>
-                    <td className="py-3.5 px-4 text-xs text-slate-600">
-                      {db.server_nodes?.name || "ServerByte Node 01"}
+                    <td className="py-3.5 px-4 text-xs">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-cyan-50 border border-cyan-200 text-cyan-800 font-semibold">
+                        <span className="w-1.5 h-1.5 rounded-full bg-cyan-500"></span>
+                        TiDB Cloud Serverless
+                      </span>
                     </td>
                     <td className="py-3.5 px-4">
                       <span className="inline-block px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800">
@@ -733,26 +736,31 @@ export default function Databases() {
                 </select>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">
-                  Host Execution Server Node
-                </label>
-                <select
-                  name="server_node_id"
-                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
-                >
-                  {serverNodes.map((n: any) => (
-                    <option key={n.id} value={n.id}>
-                      🖥️ {n.name} ({n.ip_address})
-                    </option>
-                  ))}
-                </select>
+              <input type="hidden" name="server_node_id" value={serverNodes[0]?.id || ""} />
+
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-700">Database Engine Architecture</span>
+                  <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-cyan-100 text-cyan-800 border border-cyan-200">
+                    TiDB Cloud Serverless
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-500 flex flex-col gap-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-emerald-500">🔒</span>
+                    <span className="font-medium text-slate-700">AWS Singapore Cluster with Encrypted TLS / SSL</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-cyan-600">⚡</span>
+                    <span>Automated user isolation and 1-click phpMyAdmin access</span>
+                  </div>
+                </div>
               </div>
 
               <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between">
                 <div>
-                  <div className="text-xs font-bold text-slate-700">Verify MySQL Connection</div>
-                  <div className="text-[11px] text-slate-400">Tests connection over TCP port 3306</div>
+                  <div className="text-xs font-bold text-slate-700">Verify TiDB Cloud Connection</div>
+                  <div className="text-[11px] text-slate-400">Tests live TLS/SSL handshake to TiDB cluster</div>
                 </div>
                 <button
                   type="button"
