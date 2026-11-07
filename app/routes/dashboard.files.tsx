@@ -3,7 +3,7 @@ import {
   unstable_createMemoryUploadHandler,
   unstable_parseMultipartFormData,
 } from "@remix-run/node";
-import { Form, Link, useActionData, useLoaderData, useNavigation, useSearchParams } from "@remix-run/react";
+import { Form, Link, useActionData, useLoaderData, useNavigation, useSearchParams, useSubmit } from "@remix-run/react";
 import { useEffect, useState } from "react";
 import Button from "~/components/Button";
 import { requireUserProfile } from "~/utils/auth.server";
@@ -236,6 +236,88 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
+  // 2b. Deploy Full ZIP website bundle uploaded directly to Supabase Storage via signed URL (bypasses 6MB limit)
+  if (intent === "deploy_uploaded_zip") {
+    const zipStoragePath = String(formData.get("zip_storage_path") || "");
+    const zipName = String(formData.get("zip_name") || "website.zip");
+
+    if (!zipStoragePath) {
+      return Response.json({ error: "Missing uploaded ZIP reference." }, { status: 400 });
+    }
+
+    try {
+      // Download the ZIP buffer directly from Supabase Storage
+      const { data: zipBlob, error: dlErr } = await supabaseAdmin.storage
+        .from("client-websites")
+        .download(zipStoragePath);
+
+      if (dlErr || !zipBlob) {
+        return Response.json({ error: "Failed to read uploaded archive from storage." }, { status: 500 });
+      }
+
+      const buffer = Buffer.from(await zipBlob.arrayBuffer());
+      const result = await deployZipToCloudStorage(project.subdomain, buffer);
+
+      // Clean up temporary ZIP from storage
+      await supabaseAdmin.storage.from("client-websites").remove([zipStoragePath]);
+
+      await supabaseAdmin.from("deployments").insert({
+        project_id: project.id,
+        version_number: 1,
+        runtime: project.runtime || "static",
+        source_type: "zip_upload",
+        status: "deployed",
+        commit_message: `Uploaded ZIP: ${zipName} (${result.uploadedCount} files deployed)`,
+        deployed_by: profile.id,
+        logs: `Extracted and deployed ${result.uploadedCount} files to cloud storage for ${project.subdomain}.`,
+      });
+
+      return Response.json({
+        success: `Successfully deployed ${result.uploadedCount} files from ZIP archive!`,
+      });
+    } catch (err: any) {
+      return Response.json({ error: err.message || "Failed to process ZIP." }, { status: 500 });
+    }
+  }
+
+  // 1b. Sync individual files uploaded directly via signed URL (bypasses 6MB limit)
+  if (intent === "sync_uploaded_files") {
+    const filesJson = String(formData.get("uploaded_files_json") || "[]");
+    let fileList: Array<{ path: string }> = [];
+    try {
+      fileList = JSON.parse(filesJson);
+    } catch {
+      fileList = [];
+    }
+
+    if (fileList.length === 0) {
+      return Response.json({ error: "No files to sync." }, { status: 400 });
+    }
+
+    const filesToSync: Array<{ path: string; buffer: Buffer }> = [];
+    for (const item of fileList) {
+      const storageKey = `${project.subdomain}/${item.path}`;
+      const { data: fileBlob } = await supabaseAdmin.storage
+        .from("client-websites")
+        .download(storageKey);
+
+      if (fileBlob) {
+        filesToSync.push({
+          path: item.path,
+          buffer: Buffer.from(await fileBlob.arrayBuffer()),
+        });
+      }
+    }
+
+    if (filesToSync.length > 0) {
+      await syncFilesToExecutionNode(project.subdomain, filesToSync);
+    }
+
+    return Response.json({
+      success: `Successfully uploaded and synced ${filesToSync.length} file(s) into /${currentPath || "root"}.`,
+    });
+  }
+
   // 3. Create New File
   if (intent === "create_file") {
     const fileName = String(formData.get("file_name") || "").trim();
@@ -382,6 +464,7 @@ export default function FileManager() {
   const actionData = useActionData<{ error?: string; success?: string }>();
   const navigation = useNavigation();
   const [searchParams, setSearchParams] = useSearchParams();
+  const submit = useSubmit();
 
   const isSubmitting = navigation.state === "submitting";
 
@@ -393,6 +476,177 @@ export default function FileManager() {
   const [showNewFileModal, setShowNewFileModal] = useState(false);
   const [showNewFolderModal, setShowNewFolderModal] = useState(false);
   const [showDeployZipModal, setShowDeployZipModal] = useState(false);
+
+  // Direct upload progress modal state (bypasses 6MB limit)
+  const [uploadProgress, setUploadProgress] = useState<{
+    isUploading: boolean;
+    percent: number;
+    message: string;
+  } | null>(null);
+
+  // Direct ZIP upload bypassing Netlify 6MB payload limits
+  const handleDirectZipUpload = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const fileInput = form.querySelector('input[name="zip_file"]') as HTMLInputElement;
+    const file = fileInput?.files?.[0];
+    if (!file) return;
+
+    setUploadProgress({
+      isUploading: true,
+      percent: 0,
+      message: "Requesting secure direct storage upload URL...",
+    });
+
+    try {
+      // 1. Get signed upload URL from Supabase Storage
+      const urlRes = await fetch(
+        `/api/upload-url?project_id=${encodeURIComponent(selectedProjectId)}&filename=${encodeURIComponent(
+          file.name
+        )}&type=deploy_zip`
+      );
+      const urlData = await urlRes.json();
+      if (!urlRes.ok || !urlData.signedUrl) {
+        throw new Error(urlData.error || "Failed to generate direct upload URL.");
+      }
+
+      // 2. Direct upload to Supabase Storage with live percentage tracking
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", urlData.signedUrl);
+        xhr.setRequestHeader("Content-Type", file.type || "application/zip");
+        xhr.setRequestHeader("x-upsert", "true");
+
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            const percent = Math.round((event.loaded / event.total) * 100);
+            setUploadProgress({
+              isUploading: true,
+              percent,
+              message: `Uploading ${file.name} directly to storage (${percent}%)...`,
+            });
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(xhr.response);
+          } else {
+            reject(new Error(`Storage returned HTTP ${xhr.status}: ${xhr.statusText}`));
+          }
+        };
+
+        xhr.onerror = () => reject(new Error("Network error during direct storage upload."));
+        xhr.send(file);
+      });
+
+      setUploadProgress({
+        isUploading: true,
+        percent: 100,
+        message: "Unpacking and deploying website files to webroot...",
+      });
+
+      // 3. Notify backend action with tiny metadata payload
+      const fd = new FormData();
+      fd.append("intent", "deploy_uploaded_zip");
+      fd.append("project_id", selectedProjectId);
+      fd.append("zip_storage_path", urlData.storagePath);
+      fd.append("zip_name", file.name);
+
+      submit(fd, { method: "POST" });
+      setShowDeployZipModal(false);
+    } catch (err: any) {
+      alert(err.message || "Failed to upload and deploy ZIP.");
+    } finally {
+      setUploadProgress(null);
+    }
+  };
+
+  // Direct File upload bypassing Netlify 6MB payload limits
+  const handleDirectFileUpload = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const fileInput = form.querySelector('input[name="uploaded_files"]') as HTMLInputElement;
+    const files = Array.from(fileInput?.files || []);
+    if (files.length === 0) return;
+
+    // For files under 4MB total, regular submission works fine
+    const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
+    if (totalBytes < 4 * 1024 * 1024) {
+      submit(form);
+      setShowUploadModal(false);
+      return;
+    }
+
+    setUploadProgress({
+      isUploading: true,
+      percent: 0,
+      message: `Starting direct cloud upload for ${files.length} file(s)...`,
+    });
+
+    try {
+      const uploadedFileList: Array<{ path: string }> = [];
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const percentBase = Math.round((i / files.length) * 100);
+
+        setUploadProgress({
+          isUploading: true,
+          percent: percentBase,
+          message: `Uploading ${file.name} (${i + 1}/${files.length})...`,
+        });
+
+        const urlRes = await fetch(
+          `/api/upload-url?project_id=${encodeURIComponent(
+            selectedProjectId
+          )}&filename=${encodeURIComponent(file.name)}&type=file&current_path=${encodeURIComponent(
+            currentPath
+          )}`
+        );
+        const urlData = await urlRes.json();
+        if (!urlRes.ok || !urlData.signedUrl) {
+          throw new Error(urlData.error || `Failed to get upload URL for ${file.name}`);
+        }
+
+        await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("PUT", urlData.signedUrl);
+          xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+          xhr.setRequestHeader("x-upsert", "true");
+
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.response);
+            else reject(new Error(`Storage error on ${file.name}: HTTP ${xhr.status}`));
+          };
+          xhr.onerror = () => reject(new Error(`Upload failed for ${file.name}`));
+          xhr.send(file);
+        });
+
+        const relPath = currentPath ? `${currentPath}/${urlData.cleanFileName}` : urlData.cleanFileName;
+        uploadedFileList.push({ path: relPath });
+      }
+
+      setUploadProgress({
+        isUploading: true,
+        percent: 100,
+        message: "Syncing files to hosting node...",
+      });
+
+      const fd = new FormData();
+      fd.append("intent", "sync_uploaded_files");
+      fd.append("project_id", selectedProjectId);
+      fd.append("current_path", currentPath);
+      fd.append("uploaded_files_json", JSON.stringify(uploadedFileList));
+
+      submit(fd, { method: "POST" });
+      setShowUploadModal(false);
+    } catch (err: any) {
+      alert(err.message || "Failed to upload files.");
+    } finally {
+      setUploadProgress(null);
+    }
+  };
 
   // Code Editor Modal State ("file edit in new window")
   const [editorState, setEditorState] = useState<{
@@ -1076,7 +1330,7 @@ export default function FileManager() {
             <Form
               method="POST"
               encType="multipart/form-data"
-              onSubmit={() => setShowUploadModal(false)}
+              onSubmit={handleDirectFileUpload}
               className="p-6 space-y-4"
             >
               <input type="hidden" name="intent" value="upload_files" />
@@ -1288,7 +1542,7 @@ export default function FileManager() {
             <Form
               method="POST"
               encType="multipart/form-data"
-              onSubmit={() => setShowDeployZipModal(false)}
+              onSubmit={handleDirectZipUpload}
               className="p-6 space-y-4"
             >
               <input type="hidden" name="intent" value="deploy_zip" />
@@ -1318,13 +1572,46 @@ export default function FileManager() {
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || !!uploadProgress}
                   className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 disabled:opacity-50"
                 >
-                  {isSubmitting ? "Deploying..." : "Unpack & Deploy"}
+                  {uploadProgress ? "Transferring..." : isSubmitting ? "Deploying..." : "Unpack & Deploy"}
                 </button>
               </div>
             </Form>
+          </div>
+        </div>
+      )}
+
+      {/* DIRECT UPLOAD PROGRESS MODAL (BYPASSES NETLIFY 6MB LIMIT) */}
+      {uploadProgress && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-slate-200 p-6 space-y-4 animate-in fade-in duration-200">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-cyan-100 flex items-center justify-center text-cyan-600 text-lg font-bold">
+                ⚡
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-900 text-base">Direct Cloud Upload</h3>
+                <p className="text-xs text-slate-500">High-speed transfer bypassing serverless body limits</p>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-xs font-semibold text-slate-700">
+                <span className="truncate max-w-[280px]">{uploadProgress.message}</span>
+                <span className="font-mono text-cyan-700">{uploadProgress.percent}%</span>
+              </div>
+              <div className="w-full bg-slate-100 rounded-full h-3 overflow-hidden">
+                <div
+                  className="bg-gradient-to-r from-cyan-500 to-indigo-600 h-3 rounded-full transition-all duration-300"
+                  style={{ width: `${uploadProgress.percent}%` }}
+                />
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-400 text-center">
+              Please keep this page open while the transfer completes...
+            </p>
           </div>
         </div>
       )}

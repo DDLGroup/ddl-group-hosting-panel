@@ -43,6 +43,7 @@ export async function deployZipToCloudStorage(subdomain: string, zipBuffer: Buff
     throw new Error("The uploaded ZIP archive is empty.");
   }
 
+  // Normalize all entry names (convert Windows backslashes to forward slashes)
   const fileEntries = zipEntries.filter(
     (e) => !e.isDirectory && !e.entryName.startsWith("__MACOSX") && !e.entryName.includes(".DS_Store")
   );
@@ -51,13 +52,16 @@ export async function deployZipToCloudStorage(subdomain: string, zipBuffer: Buff
     throw new Error("No deployable web files found in the archive.");
   }
 
-  const firstPathSegments = fileEntries.map((e) => e.entryName.split("/")[0]);
+  const normalizedPaths = fileEntries.map((e) => e.entryName.replace(/\\/g, "/"));
+  const firstPathSegments = normalizedPaths.map((p) => p.split("/")[0]);
   const hasCommonRoot = firstPathSegments.every((seg) => seg === firstPathSegments[0]) && firstPathSegments[0] !== "";
 
   const uploadedFiles: string[] = [];
+  const cleanZipForNode = new AdmZip();
 
-  for (const entry of fileEntries) {
-    let cleanPath = entry.entryName;
+  for (let i = 0; i < fileEntries.length; i++) {
+    const entry = fileEntries[i];
+    let cleanPath = normalizedPaths[i];
     if (hasCommonRoot) {
       cleanPath = cleanPath.split("/").slice(1).join("/");
     }
@@ -65,8 +69,9 @@ export async function deployZipToCloudStorage(subdomain: string, zipBuffer: Buff
     if (!cleanPath) continue;
 
     const fileBuffer = entry.getData();
-    const contentType = getMimeType(cleanPath);
+    cleanZipForNode.addFile(cleanPath, fileBuffer);
 
+    const contentType = getMimeType(cleanPath);
     const storagePath = `${subdomain}/${cleanPath}`;
 
     const { error } = await supabaseAdmin.storage
@@ -83,8 +88,8 @@ export async function deployZipToCloudStorage(subdomain: string, zipBuffer: Buff
     }
   }
 
-  // Also auto-sync to assigned server node (e.g. ServerByte) if attached
-  await syncZipBufferToExecutionNode(subdomain, zipBuffer);
+  // Also auto-sync clean normalized zip to assigned server node (e.g. ServerByte)
+  await syncZipBufferToExecutionNode(subdomain, cleanZipForNode.toBuffer());
 
   return {
     success: true,
