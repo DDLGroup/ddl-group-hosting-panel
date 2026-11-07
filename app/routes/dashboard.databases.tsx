@@ -355,17 +355,17 @@ export default function Databases() {
       navigator.clipboard.writeText(db.database_password);
       setCopiedField(`pma_${db.id || "launch"}`);
       setTimeout(() => setCopiedField(null), 3000);
-      const ssoUrl = `https://panel.ddlg.in/sites/pma/sso.php?auth_key=DDL_SECRET_KEY_999RS_SECURE_TOKEN_2026&user=${encodeURIComponent(
+      const ssoUrl = `https://panel.ddlg.in/sites/pma/signon_login.php?username=${encodeURIComponent(
         db.database_user
-      )}&pass=${encodeURIComponent(db.database_password)}&db=${encodeURIComponent(
+      )}&password=${encodeURIComponent(db.database_password)}&db=${encodeURIComponent(
         db.database_name || ""
       )}`;
       window.open(ssoUrl, "_blank");
       return;
     }
-    const pmaUrl = `https://panel.ddlg.in/sites/pma/?username=${encodeURIComponent(
+    const pmaUrl = `https://panel.ddlg.in/sites/pma/signon_login.php?username=${encodeURIComponent(
       db.database_user || ""
-    )}&db=${encodeURIComponent(db.database_name || "")}`;
+    )}`;
     window.open(pmaUrl, "_blank");
   };
 
